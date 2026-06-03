@@ -1,0 +1,1549 @@
+---
+title: "Análisis Mutacional"
+author: 'Noé Gragera Jiménez'
+subtitle: '`r params$subtitulo`'
+date: '`r format(Sys.Date(),"%e de %B, %Y")`' 
+# date: \today  (solo para pdf)
+output:
+  html_document:
+    theme: united
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    keep_tex: no
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+nocite: |
+  @lantz2015machine
+  @max2017caret
+lang: es
+params:
+  subtitulo: Detección de alteraciones genómicas en LUAD y LUSC
+geometry: margin=2cm
+---
+
+articulos extra: <https://pmc.ncbi.nlm.nih.gov/articles/PMC7926392/>
+
+# Análisi mutacional con datos TCGA MC3:
+
+## 1. Obtención de los datos
+
+Primero de todo, se accede a los datos Whole Exome Sequencing (WES), de TCGA MC3, tanto de adenocarcinoma pulmonar (LUAD) como carcinoma escamoso (LUSC).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+library(maftools)
+library(TCGAmutations)
+
+#tcga_available()
+
+LUAD_MAF <- tcga_load(study = "LUAD")
+LUSC_MAF <- tcga_load(study = "LUSC")
+```
+
+## 2. Características de la cohorte:
+
+```{r}
+
+library(dplyr)
+library(knitr)
+library(openxlsx)
+# ==========================================
+# Extraer datos clínicos
+# ==========================================
+
+luad <- LUAD_MAF@clinical.data
+lusc <- LUSC_MAF@clinical.data
+
+n_luad <- length(unique(luad$Tumor_Sample_Barcode_min)) #número de pacientes
+n_lusc <- length(unique(lusc$Tumor_Sample_Barcode_min))
+
+# ==========================================
+# Función formato n (%)
+# ==========================================
+
+fmt_n_pct <- function(x, total) {
+  paste0(x, " (", round(100 * x / total), "%)")
+}
+
+# ==========================================
+# Extraer niveles de las variables categoricas:
+# ==========================================
+# ==========================================
+# Crear resumen estadístico de la edad:
+# ==========================================
+
+luad_age <- paste0(
+  median(luad$CDR_age_at_initial_pathologic_diagnosis, na.rm = TRUE),
+  " (", min(luad$CDR_age_at_initial_pathologic_diagnosis, na.rm = TRUE),
+  "–",max(luad$CDR_age_at_initial_pathologic_diagnosis, na.rm = TRUE),")")
+
+lusc_age <- paste0(
+  median(lusc$CDR_age_at_initial_pathologic_diagnosis, na.rm = TRUE)," (",
+  min(lusc$CDR_age_at_initial_pathologic_diagnosis, na.rm = TRUE),"–",
+  max(lusc$CDR_age_at_initial_pathologic_diagnosis, na.rm = TRUE),")")
+
+# ==========================================
+# Categorias de Género
+# ==========================================
+
+sex_levels <- union(
+  sort(as.character(luad$CDR_gender)),
+  sort(as.character(lusc$CDR_gender))
+)
+
+# ==========================================
+# Categorias de Étnicos:
+# ==========================================
+race_levels <- union(
+  sort(as.character(luad$CDR_race)),
+  sort(as.character(lusc$CDR_race))
+)
+
+# ==========================================
+# Categorias de consumo de Tabaco:
+# ==========================================
+smoke_levels <- union(
+  sort(unique(as.character(luad$tobacco_smoking_history))),
+  sort(as.character(lusc$tobacco_smoking_history))
+)
+
+# ==========================================
+# Cateforias del estadio tumoral
+# ==========================================
+stage_levels <- union(
+  sort(as.character(luad$CDR_ajcc_pathologic_tumor_stage)),
+  sort(as.character(lusc$CDR_ajcc_pathologic_tumor_stage))
+)
+
+
+# ==========================================
+# Indentación tipo paper
+# ==========================================
+
+indent <- "\u00A0\u00A0\u00A0\u00A0"
+
+# =========================
+# DATAFRAME FINAL
+# =========================
+
+table_df <- data.frame(
+  Characteristic = c(
+  "<u>Age at diagnosis</u>",
+  paste0(indent, "Median (range)"),
+
+  "<u>Sex</u>",
+  paste0(indent, sex_levels),
+
+  "<u>Race</u>",
+  paste0(indent, race_levels),
+
+  "<u>Smoking history</u>",
+  paste0(indent, smoke_levels),
+
+  "<u>AJCC pathologic tumor stage</u>",
+  paste0(indent, stage_levels)
+),
+  LUAD = c(
+  "",
+  luad_age,
+
+  "",
+  sapply(sex_levels, function(x)
+    paste0(
+      sum(luad$CDR_gender == x, na.rm = TRUE), " (",
+      round(100 * sum(luad$CDR_gender == x, na.rm = TRUE) / n_luad), "%)"
+    )
+  ),
+
+  "",
+  sapply(race_levels, function(x)
+    paste0(
+      sum(luad$CDR_race == x, na.rm = TRUE), " (",
+      round(100 * sum(luad$CDR_race == x, na.rm = TRUE) / n_luad), "%)"
+    )
+  ),
+
+  "",
+  sapply(smoke_levels, function(x)
+    paste0(
+      sum(luad$tobacco_smoking_history == x, na.rm = TRUE), " (",
+      round(100 * sum(luad$tobacco_smoking_history == x, na.rm = TRUE) / n_luad), "%)"
+    )
+  ),
+
+  "",
+  sapply(stage_levels, function(x)
+    paste0(
+      sum(luad$CDR_ajcc_pathologic_tumor_stage == x, na.rm = TRUE), " (",
+      round(100 * sum(luad$CDR_ajcc_pathologic_tumor_stage == x, na.rm = TRUE) / n_luad), "%)"
+    )
+  )
+),
+  LUSC = c(
+  "",
+  lusc_age,
+
+  "",
+  sapply(sex_levels, function(x)
+    paste0(
+      sum(lusc$CDR_gender == x, na.rm = TRUE), " (",
+      round(100 * sum(lusc$CDR_gender == x, na.rm = TRUE) / n_lusc), "%)"
+    )
+  ),
+
+  "",
+  sapply(race_levels, function(x)
+    paste0(
+      sum(lusc$CDR_race == x, na.rm = TRUE), " (",
+      round(100 * sum(lusc$CDR_race == x, na.rm = TRUE) / n_lusc), "%)"
+    )
+  ),
+
+  "",
+  sapply(smoke_levels, function(x)
+    paste0(
+      sum(lusc$tobacco_smoking_history == x, na.rm = TRUE), " (",
+      round(100 * sum(lusc$tobacco_smoking_history == x, na.rm = TRUE) / n_lusc), "%)"
+    )
+  ),
+
+  "",
+  sapply(stage_levels, function(x)
+    paste0(
+      sum(lusc$CDR_ajcc_pathologic_tumor_stage == x, na.rm = TRUE), " (",
+      round(100 * sum(lusc$CDR_ajcc_pathologic_tumor_stage == x, na.rm = TRUE) / n_lusc), "%)"
+    )
+  )
+)
+)
+
+# =========================
+# OUTPUT
+# =========================
+
+kable(
+  table_df,
+  col.names = c(
+    "Características Clínicas",
+    paste0("LUAD (n = ", n_luad, ")"),
+    paste0("LUSC (n = ", n_lusc, ")")
+  )
+)
+
+#write.xlsx(table_df, "tabla_LUAD_LUSC_clinical.xlsx")
+
+```
+## 3. Filtrado de los datos:
+
+```{r}
+# Aplicar el filtro PASS de MC3:
+LUAD_MAF <- subsetMaf(LUAD_MAF, query = "FILTER == 'PASS'")
+LUSC_MAF <- subsetMaf(LUSC_MAF, query = "FILTER == 'PASS'")
+
+#Verificar los barcodes con tipo tumoral:
+table(LUAD_MAF@clinical.data$type)
+table(LUSC_MAF@clinical.data$type)
+```
+
+
+## 4. Características Generales que diferencian ambos tumores:
+
+### 4.1. Heterogeneidad (MATH score) y firmas genéticas:
+https://pmc.ncbi.nlm.nih.gov/articles/PMC8861524/
+
+```{r}
+#Cálculo manual del VAF de cada gen: (inferheterogenity te lo estima si no encuentra columna vaf)
+LUAD_MAF@data$LUAD_VAF <- LUAD_MAF@data$t_alt_count / (LUAD_MAF@data$t_alt_count + LUAD_MAF@data$t_ref_count)
+
+LUSC_MAF@data$LUSC_VAF <- LUSC_MAF@data$t_alt_count / (LUSC_MAF@data$t_alt_count + LUSC_MAF@data$t_ref_count)
+```
+
+```{r, message=FALSE}
+library(maftools)
+library(dplyr)
+library(patchwork)
+
+######## LUAD ##########
+# InferHeterogenity: poner barcodes de todas las muestras como un vector
+heterogeneidad_LUAD <- inferHeterogeneity(maf = LUAD_MAF, tsb = c(unique(LUAD_MAF@data$Tumor_Sample_Barcode)), vafCol = "LUAD_VAF")
+
+#Extraer todos los valores de MATH:
+datosData_LUAD <- heterogeneidad_LUAD$clusterData
+
+
+# Dado que el math de la muestra sale repetido por x genes se selecciona una vez,
+#se prepara una tabla filtrada y ordenada:
+math_LUAD_samples <- datosData_LUAD %>%
+  group_by(Tumor_Sample_Barcode) %>% #Agrupa los mismos Tumor_Samples_Barcodes
+  summarise(MATH = first(MATH)) %>%  #Selecciona el primer valor MATH
+  filter(!is.na(MATH)) %>% #Quitar si hay algun NAs
+  arrange(MATH) # Ordear decrecientemente MATH
+
+#Calcular media como umbral de alto MATH o bajo:
+mediana_MATH_LUAD<- median(math_LUAD_samples$MATH)
+math_LUAD_samples$MATH_type <- ifelse(math_LUAD_samples$MATH > mediana_MATH_LUAD, "math_high", "math_low")
+
+library(ggplot2)
+
+plot1_luad <- ggplot(math_LUAD_samples, aes(x = 1:nrow(math_LUAD_samples), y = MATH, fill = MATH_type)) +
+  geom_bar(stat = "identity", width = 1, fill = "#08306b", colour = "midnightblue" ,linewidth = 0.05) +
+  theme_classic() +
+  labs(
+    title = "Heterogeneidad Intra-tumoral: muestras LUAD",
+    x = "Pacientes (Ordenados por MATH)",
+    y = "MATH score") 
+
+plot2_luad <- ggplot(math_LUAD_samples, aes(x = 1:nrow(math_LUAD_samples), y = 1, fill = MATH_type)) +
+  geom_tile() + 
+  scale_fill_manual(values = c("math_high" = "firebrick", "math_low" = "steelblue")) +
+  theme_void() + 
+  theme(legend.position = "bottom",
+        legend.justification = "left") +
+  labs(fill = "MATH_type")
+
+plot1_luad / plot2_luad + plot_layout(heights = c(10, 0.5))
+
+```
+
+```{r, message=FALSE}
+######## LUSC ##########
+# InferHeterogenity: poner barcodes de todas las muestras como un vector
+heterogeneidad_LUSC <- inferHeterogeneity(maf = LUSC_MAF, tsb = c(unique(LUSC_MAF@data$Tumor_Sample_Barcode)), vafCol = "LUSC_VAF")
+
+
+#Extraer todos los valores de MATH:
+datosData_LUSC <- heterogeneidad_LUSC$clusterData
+
+
+# Dado que el math de la muestra sale repetido por x genes se selecciona una vez,
+#se prepara una tabla filtrada y ordenada:
+math_LUSC_samples <- datosData_LUSC %>%
+  group_by(Tumor_Sample_Barcode) %>% #Agrupa los mismos Tumor_Samples_Barcodes
+  summarise(MATH = first(MATH)) %>%  #Selecciona el primer valor MATH
+  filter(!is.na(MATH)) %>% #Quitar si hay algun NAs
+  arrange(MATH) # Ordear decrecientemente MATH
+
+#Calcular media como umbral de alto MATH o bajo:
+mediana_MATH_LUSC<- median(math_LUSC_samples$MATH)
+math_LUSC_samples$MATH_type <- ifelse(math_LUSC_samples$MATH > mediana_MATH_LUSC, "math_high", "math_low")
+
+library(ggplot2)
+
+plot1_lusc <- ggplot(math_LUSC_samples, aes(x = 1:nrow(math_LUSC_samples), y = MATH, fill = MATH_type)) +
+  geom_bar(stat = "identity", fill = "#08306b", colour = "midnightblue" ,linewidth = 0.05) +
+  theme_classic() +
+  labs(
+    title = "Heterogeneidad Intra-tumoral: muestras LUSC",
+    x = "Pacientes (Ordenados por MATH)",
+    y = "MATH score") 
+
+plot2_lusc <- ggplot(math_LUSC_samples, aes(x = 1:nrow(math_LUSC_samples), y = 1, fill = MATH_type)) +
+  geom_tile() + 
+  scale_fill_manual(values = c("math_high" = "firebrick", "math_low" = "steelblue")) +
+  theme_void() + 
+  theme(legend.position = "bottom",
+        legend.justification = "left") +
+  labs(fill = "MATH_type")
+
+plot1_lusc / plot2_lusc + plot_layout(heights = c(10, 0.5))
+
+```
+
+```{r}
+library(ggpubr)
+
+MATH_plot <- rbind(
+  data.frame(MATH = math_LUAD_samples$MATH, Grupo = "LUAD"),
+  data.frame(MATH = math_LUSC_samples$MATH, Grupo = "LUSC")
+)
+
+ggplot(MATH_plot, aes(x = Grupo, y = MATH, fill = Grupo, colour = Grupo)) +
+  geom_boxplot(colour="black") +
+  
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  stat_compare_means(method = "wilcox.test", label.y = max(MATH_plot$MATH) + 5) +
+  stat_summary(
+    fun = median,
+    geom = "text",
+    aes(label = round(after_stat(y), 2)),
+    vjust = -0.5,
+    size = 5,
+    col = 'black',
+    fontface = "bold"
+  ) +
+  theme_minimal() +
+  labs(title = "Comparación MATH: LUAD vs LUSC",
+       y = "MATH Score (Heterogeneidad)",
+       x = "Cohorte")
+
+```
+
+### 4.2. Firmas mutacionales :
+
+```{r, warning= FALSE, message=FALSE}
+library(MutationalPatterns)
+library(BSgenome)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(NMF)
+
+# ====================== #
+# MAF a GRanges:
+# ====================== #
+
+luad_gr <- makeGRangesFromDataFrame(
+  LUAD_MAF@data, 
+  keep.extra.columns = TRUE, 
+  seqnames.field = "Chromosome", 
+  start.field = "Start_Position", 
+  end.field = "End_Position"
+)
+
+
+lusc_gr <- makeGRangesFromDataFrame(
+  LUSC_MAF@data, 
+  keep.extra.columns = TRUE, 
+  seqnames.field = "Chromosome", 
+  start.field = "Start_Position", 
+  end.field = "End_Position"
+) # explicado en este foro:https://github.com/UMCUGenetics/MutationalPatterns/issues/59
+
+library(GenomeInfoDb)
+seqlevelsStyle(luad_gr) <- "UCSC"
+seqlevelsStyle(lusc_gr) <- "UCSC"
+
+# ====================== #
+# Añadir metadata
+# ====================== #
+
+mcols(luad_gr)$sample <- LUAD_MAF@data$Tumor_Sample_Barcode
+mcols(luad_gr)$REF <- LUAD_MAF@data$Reference_Allele
+mcols(luad_gr)$ALT <- LUAD_MAF@data$Tumor_Seq_Allele2
+
+mcols(lusc_gr)$sample <- LUSC_MAF@data$Tumor_Sample_Barcode
+mcols(lusc_gr)$REF <- LUSC_MAF@data$Reference_Allele
+mcols(lusc_gr)$ALT <- LUSC_MAF@data$Tumor_Seq_Allele2
+
+# Asignar explícitamente el nombre del genoma
+genome(luad_gr) <- "hg19"
+genome(lusc_gr) <- "hg19"
+
+# ====================== #
+# Descargar genoma referencia
+# ====================== #
+
+ref_genome <- "BSgenome.Hsapiens.UCSC.hg19"
+
+
+# ====================== #
+# Filtrar por SNP para hacer el estudio de signatures
+# ====================== #
+
+luad_gr_snp <- luad_gr[luad_gr$Variant_Type == "SNP",]
+lusc_gr_snp <- lusc_gr[lusc_gr$Variant_Type == "SNP",]
+
+
+# ====================== #
+# Hacer Mutational Matrix
+# ====================== #
+
+mut_mat_luad <- mut_matrix(vcf_list = split(luad_gr_snp, luad_gr_snp$Tumor_Sample_Barcode), ref_genome = ref_genome)
+mut_mat_lusc <- mut_matrix(vcf_list = split(lusc_gr_snp, lusc_gr_snp$Tumor_Sample_Barcode), ref_genome = ref_genome)
+
+# ====================== #
+# NMF : determinar la factorzación del rango correcto para el número de firmas a coger:
+# ====================== #
+
+#Quitar muestras que su suma de mutaciones es 0: ya que se han colado los barcodes de los levels que no salen representados en data:
+mut_mat_luad <- mut_mat_luad[, colSums(mut_mat_luad) > 0]
+mut_mat_lusc <- mut_mat_lusc[, colSums(mut_mat_lusc) > 0]
+
+estimate_luad <- nmf(mut_mat_luad, rank = 2:5, method = "brunet", 
+                nrun = 10, seed = 123456, .opt = "v-p")
+estimate_lusc <- nmf(mut_mat_lusc, rank = 2:5, method = "brunet", 
+                nrun = 10, seed = 123456, .opt = "v-p")
+
+
+plot(estimate_luad)
+plot(estimate_lusc)
+```
+
+
+Como se puede ver en ambos casos si nos fijamos en la curva de rss y residuals estas caen en picado pero en LUAD se estabiliza alrededor de 3, mientras que en LUSC en 4.
+
+```{r, fig.height=5, warning=FALSE, message=FALSE}
+nmf_res_luad <- extract_signatures(mut_mat_luad, rank = 3, nrun = 10, single_core = TRUE)
+nmf_res_lusc <- extract_signatures(mut_mat_lusc, rank = 4, nrun = 10, single_core = TRUE)
+
+signatures <-  get_known_signatures()
+nmf_res_luad <- rename_nmf_signatures(nmf_res_luad, signatures, cutoff = 0.85)
+nmf_res_lusc <- rename_nmf_signatures(nmf_res_lusc, signatures, cutoff = 0.85)
+
+# ====================== #
+# Combinación de nuestras firmas con la función de compareSignatures de maftols, para sacar 
+# la etiología de cada fimra comparada con la base de datos de firmas de SBS :
+# ====================== #
+aetiology_sig_luad <- compareSignatures(nmfRes = nmf_res_luad , sig_db = "SBS")
+
+aetiology_sig_lusc <- compareSignatures(nmfRes = nmf_res_lusc , sig_db = "SBS")
+
+
+# ====================== #
+#Graficación:
+# ====================== #
+
+# Extraemos la etiologia de cada firma: Nombre nuestra firma: + desripción etiologica (firma SBS):
+leyenda_signatures_luad <- paste0(
+  "• ", names(aetiology_sig_luad$best_match)[1], ": ", aetiology_sig_luad$best_match[[1]]$aetiology, " (", gsub("Best match: | \\[.*", "", aetiology_sig_luad$best_match[[1]]$best_match), ")\n",
+  "• ", names(aetiology_sig_luad$best_match)[2], ": ", aetiology_sig_luad$best_match[[2]]$aetiology, " (", gsub("Best match: | \\[.*", "", aetiology_sig_luad$best_match[[2]]$best_match), ")\n",
+  "• ", names(aetiology_sig_luad$best_match)[3], ": ", aetiology_sig_luad$best_match[[3]]$aetiology, " (", gsub("Best match: | \\[.*", "", aetiology_sig_luad$best_match[[3]]$best_match), ")"
+)
+
+leyenda_signatures_lusc <- paste0(
+  "• ", names(aetiology_sig_lusc$best_match)[1], ": ", aetiology_sig_lusc$best_match[[1]]$aetiology, " (", gsub("Best match: | \\[.*", "", aetiology_sig_lusc$best_match[[1]]$best_match), ")\n",
+  "• ", names(aetiology_sig_lusc$best_match)[2], ": ", aetiology_sig_lusc$best_match[[2]]$aetiology, " (", gsub("Best match: | \\[.*", "", aetiology_sig_lusc$best_match[[2]]$best_match), ")\n",
+  "• ", names(aetiology_sig_lusc$best_match)[3], ": ", aetiology_sig_lusc$best_match[[3]]$aetiology, " (", gsub("Best match: | \\[.*", "", aetiology_sig_lusc$best_match[[3]]$best_match), ")\n",
+  "• ", names(aetiology_sig_lusc$best_match)[4], ": ", aetiology_sig_lusc$best_match[[4]]$aetiology, " (", gsub("Best match: | \\[.*", "", aetiology_sig_lusc$best_match[[4]]$best_match), ")"
+)
+
+
+#Gracficación fusionando el plot, con la leyenda:
+plot_96_profile(nmf_res_luad$signatures, condensed = TRUE) +
+  ggtitle("Firmas mutacionales de LUAD") + labs(caption = leyenda_signatures_luad) +
+  theme(
+    plot.caption = element_text(hjust = 0, size = 13, lineheight = 1.2),
+    plot.margin = margin(10, 10, 40, 10) # Para que no se corte el texto abajo
+  )
+
+
+plot_96_profile(nmf_res_lusc$signatures, condensed = TRUE) + ggtitle("Firmas mutacionales LUSC")+ labs(caption = leyenda_signatures_lusc) +
+  theme(
+    axis.text.x = element_text(size = 7, vjust = 0.5),
+    plot.caption = element_text(hjust = 0, size = 13, lineheight = 1.2)
+  )
+
+```
+
+
+### 4.3. Tumor Mutation Burden (TMB): non-synonimus
+
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+# ====================== #
+# Filtrar mutaciones no sinonimas:
+# ====================== #
+
+#comprobar que en @data no hay variantes silent (Variant_Classification != "Silent):
+table(LUAD_MAF@data$Variant_Classification) #no hay silent, todo es non-synonimus
+
+# ====================== #
+#Calcular TMB (mut/Mb): normalizar por tamaño exoma secuenciado (35.8 MB según maftools)
+# ====================== #
+
+LUSC_tmb <- tmb(LUSC_MAF, plotType = 'boxplot', captureSize = 35.8)
+LUAD_tmb <- tmb(LUAD_MAF, plotType = 'boxplot', captureSize = 35.8)
+LUAD_tmb$cancer <- "LUAD"
+LUSC_tmb$cancer <- "LUSC"
+tmb <- bind_rows(LUAD_tmb,LUSC_tmb) # Juntar los datos:
+
+
+# ====================== #
+#Graficar datos TMB para ver que distribución sigue:
+# ====================== #
+hist(LUSC_tmb$total_perMB, breaks = 20)
+hist(LUAD_tmb$total_perMB, breaks = 20)
+
+#No hay normalidad en los datos, supuesto que viola el t-test, por lo tanto el wilcox test:
+
+# ====================== #
+# Ver un BoxPlot de TMB (LUAD y LUSC), incorporar Wilcoxon test (prueba no parametrica ante la absencia de normalidad)
+# ====================== #
+ggplot(tmb, aes(x = cancer, y = total_perMB, fill = cancer, colour = cancer)) +
+  geom_boxplot(color="black") +
+  geom_jitter(width = 0.2, alpha = 0.4) +
+  stat_compare_means(method = "wilcox.test",size = 5) +
+  stat_summary(fun = median,
+    geom = "text",
+    aes(label = round(after_stat(y), 2)),
+    vjust = -0.5,
+    size = 5,
+    col = 'black',
+    fontface = "bold"
+  ) +
+  theme_minimal() +
+  labs(title = "Comparación TMB: LUAD vs LUSC",
+       y = "TMB (mut/Mb)",
+       x = "Cohorte")
+
+tcgaCompare(maf = LUAD_MAF, cohortName = 'Cohort-LUAD', logscale = TRUE, capture_size = 35.8)
+tcgaCompare(maf = LUSC_MAF, cohortName = 'Cohort-LUSC', logscale = TRUE, capture_size = 35.8)
+
+```
+
+
+
+## 5. Resumen mutacional de ambos carcinomas:
+
+Primero de todo se hace un análisi descriptivo de los datos de LUAD y LUSC, mediante ***plotmafSummary***:
+
+### 5.1. Resumen de LUAD:
+
+```{r}
+#Visualización archivo MAF de LUAD:
+plotmafSummary(LUAD_MAF, rmOutlier = TRUE, addStat = 'median', dashboard = TRUE, titvRaw = FALSE, titleSize = c(1.2, 1.2), textSize = 1.8)
+
+```
+
+En la cohorte de LUAD, predominan las mutaciones **missense**. Estas variantes derivan principlamente de *SNP*, alteraciones que alteran un solo nucleotido, y dan como resultado un canvio en la codificación del codón, diferente amihnoacido. De este tipo de modificación, predominan las transversiones, en concreto,la pirimidina citocina (*C*), pasa a ser la purina adenina (*A*). El segundo canvio, son por transiciones de pirimidinas, de citocina (*C*) a timina (*T*).
+
+### 5.2. Resumen de LUSC:
+
+```{r}
+plotmafSummary(LUSC_MAF, rmOutlier = TRUE, addStat = 'median', dashboard = TRUE, titvRaw = FALSE)
+```
+
+Al igual que LUAD, LUSC presenta que la mayoria de variantes son ***missense***, del tipo ***SNP***. En este caso también siguen predominando las transversiones de citocina (*C*) a adanina (*A*), y en segundo lugar las transiciones de citocina (*C*) a timina (*T*), aunque la diferencias entre transversiones i transiciones no es tan elevada como en LUAD.
+
+### 5.3. Número de transiciones y transversiones:
+
+```{r}
+luad.titv = titv(maf = LUAD_MAF, plot = FALSE, useSyn = TRUE)
+plotTiTv(res = luad.titv,baseFontSize = 1.2, axisTextSize = c(1.5, 1.5)) #cantidad de transiciones i transversiones en las mutacones driver
+
+lusc.titv = titv(maf = LUSC_MAF, plot = FALSE, useSyn = TRUE)
+plotTiTv(res = lusc.titv, baseFontSize = 1.2, axisTextSize = c(1.5, 1.5))
+```
+
+## 6. Visualización de la frecuencia mutacional:
+
+### 6.1. Oncoplot LUAD:
+
+```{r}
+# Oncoplot:
+oncoplot(maf = LUAD_MAF, draw_titv = TRUE)
+```
+
+### 6.2. Oncoplot LUSC:
+
+```{r}
+oncoplot(maf = LUSC_MAF, draw_titv = TRUE)
+```
+
+
+A partir de la representación grafica generada por los oncoplots donde me muestran en ambos carcinomas en orden descendentes los 20 genes frecuentemente más mutados, se ha observado que en los perfiles mutacionales de LUSC y LUAD predominan genes FLAG, genes frecuentemente mutados, que muestran una elevada tasa mutacional dado el gran tamaño genómico que estos abarcan, favoreciendo la acomulación de mutaciones al azar que no tienen relevancia biológica en el desarollo del cáncer, como es TTN y MUC16 (<https://pmc.ncbi.nlm.nih.gov/articles/PMC5706417/>).
+
+Por lo tanto, actuan como "ruido" estadístico, dificulta el estudio de genes relevantes para el desarollo tanto del adenocarcinoma como el carcinoma escamoso de pulmón (genes driver).
+
+## 7. Encontrar genes driver:
+
+Amplicar oncodrive(), que utiliza el algoritmo de oncodriveClust de python, muestra genes que se encuentran especialmente enriquecidos en un loci especifico (hot-spot).
+
+Para extraer los posibles genes driver se ha seguido el pipeline que establece: https://pmc.ncbi.nlm.nih.gov/articles/PMC6029450/, en el que implementan OncodriveClust, y especifican las características de selección. En este caso se ha obtado por usar el mismo valor máximo de fdrCutoff y mínimo de mutaciones por gen (minMut), en el qual se han basado en la carga mutacional de dicho tumor, a mayor carga requiere un filtro más estricto para quitar genes ruidosos.
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+oncodrive_luad <- oncodrive(maf = LUAD_MAF, AACol = "HGVSp_Short", minMut = 12, pvalMethod = "zscore")
+
+oncodrive_lusc <- oncodrive(maf = LUSC_MAF, AACol = "HGVSp_Short", minMut = 12, pvalMethod = "zscore")
+
+```
+
+```{r, error=TRUE}
+# ====================== #
+# Graficación de los genes significativos:
+# ====================== #
+plotOncodrive(res = oncodrive_luad, fdrCutOff = 0.05, useFraction = TRUE, labelSize = 0.5)
+plotOncodrive(res = oncodrive_lusc, fdrCutOff = 0.05, useFraction = TRUE, labelSize = 0.5)
+
+# ====================== #
+# Mostrar valores y nombres de los genes:
+# ====================== #
+print( bind_rows(
+  oncodrive_luad %>% as.data.frame() %>% filter(fdr < 0.05) %>% mutate(cancer_type = "LUAD"),
+  oncodrive_lusc %>% as.data.frame() %>% filter(fdr < 0.05) %>% mutate(cancer_type = "LUSC")
+) %>% 
+  select(any_of(c("Hugo_Symbol", "total", "clusters", "muts_in_clusters", "fdr", "cancer_type"))))
+
+```
+
+
+En el caso de LUAD se han detectado 4 possibles genes driver: BRAF, EGFR, U2AF1 y KRAS, estos según la literatura ya han sido estudioados y catalogados como genes driver. En canvio, en LUSC, siguiendo el mismo patrón de filtrado no se han obtenido genes significativos.
+
+## 8. Obtención genes relevantes:
+
+Con el objetivo de caracterizar el perfil mutacional que define el desarollo de LUAD y LUSC, resulta imprescindible discriminar aquellos genes con baja relevancia oncogénica, donde se ha visto con graficas anteriores (oncoplots), que estan dominadas por *genes FLAGs*: **RYR2**, **TTN**, entre otros, y genes ***passenger***. Estos carecen de impacto funcional en la progresión del tumor, y actúan como ruido genómico en el análisis. Por eso se ha obtado por enfocar el estudio con los genes driver, relevantes en el desarollo y progresión de ambos cánceres.
+
+Si bien, el análisi computacional realizado con el algoritmo OncodriveClust (oncodriver()), no ha permitido capturar un amplio aspectro de genes driver que hagan diferir la complejidad mutacional que padecen LUAD y LUSC. Por eso, a parte de verificar que los genes obtenidos en mi estudio son realmente driver (según la literatura), han sido complementados para conseguir un listado mucho más completo y robusto. Se ha obtado por implementar los datos  de *COSMIC* (Catalogue of Somatic Mutations in Cancer), concretamente el *Cancer Gene Census* (*CGC*), que proporciona un extenso catálogo de oncogenes y supresores tumorales verificados medicamente por la implicación en el desarollo de diversos tumores. 
+
+Además, para acabar de completar este listado, se ha utilizado los resultados obtenidos en el artículo de Bailey et al. (<https://pmc.ncbi.nlm.nih.gov/articles/PMC6029450/>), donde implementan un total de 26 algoritmos para predicir genes driver, bajo los datos de la cohorte TCGA. Mediante la implementación de ambos datos, permite a mi estuio dotarse de un ámplio abanico de genes drivers, importantes y recurrentemente por la literatura, además de proprcionar robustez a los resultados. 
+
+Por lo que hace COSMIC/CGC, se han filtrado los datos bajo la etiqueta *NSCLC (Non-Small Cell Lung Cancer)*, grupo tumoral que engloba tanto LUAD como LUSC, y "*TIER = 1*". Este filtrado permite capturar una mayor proporción de drivers potenciales comunes en ambas sub-histologías, en vez de utilizar etiquetas más precisas como "LUAD" o "LUSC", que dan un listado mucho más escaso, perdiendo genes importantes.
+
+Por otra banda, el listado extraido de Bailey et al., del cual identifican un total de 299 genes driver implicados en diferentes carcinomas sobre la cohorte de TCGA, se ha filtrado bajo las etiquetas de "LUAD" y "LUSC".
+
+La combinación de ambs datos, junto la verificación de los obtenidos, ha permitido obtener un perfil genómico consistente y bien respaldada por la literatura, evitando el ruido de genes passenger que ensucian el analysis. Estos drivers seleccionados, han sido los que se han estudiado a continuación en detalle.
+
+El siguiente artículo usa una metodología de selección de genes relevantes parecida a la mía, que sirve de validación de mi proceso: <https://www.frontiersin.org/journals/genetics/articles/10.3389/fgene.2019.00013/full>
+
+```{r, message=FALSE}
+library(readxl)
+library(readr)
+library(stringr)
+library(dplyr)
+
+############## Drivers de Bailey et al. (2018) ##############
+
+#   1. Cargar datos Bailey et al. (2018):
+driver_bailey <- read_excel( "/Users/noegragerajimenez/Documents/NIHMS948705-supplement-8.xlsx",
+sheet = "Table S1", skip = 2)
+
+#   2. Filtrar drivers de LUAD y LUSC:
+driver_LUAD_bailey <- driver_bailey[driver_bailey[[2]] == "LUAD", ] #Filtrado
+driver_LUAD_bailey <- driver_LUAD_bailey[[1]] #Extraer Gene Symbol
+
+driver_LUSC_bailey <- driver_bailey[driver_bailey[[2]] == "LUSC", ] #Filtrado 
+driver_LUSC_bailey <- driver_LUSC_bailey[[1]] #Extraer Gene Symbol
+
+
+############## Drivers de COSMIC CGC ########################
+
+#   1. Cargar datos de COSMIC CGC:
+cgc <- read_tsv("/Users/noegragerajimenez/Documents/Cosmic_CancerGeneCensus_Tsv_v103_GRCh37/Cosmic_CancerGeneCensus_v103_GRCh37.tsv")
+
+#   2. Filtrar datos COSMIC por TIER = 1 y etiqueta NSCLC:
+cgc_NSCLC <- cgc %>%
+  filter(
+    TIER == 1 &
+    (
+      str_detect(TUMOUR_TYPES_SOMATIC, regex("NSCLC", ignore_case = TRUE))
+    )
+  )
+
+
+#   3. Extracción de los Gene Symbol:
+cgc_NSCLC <- cgc_NSCLC[[1]]
+
+######## Tabla drivers COSMIC CGC + Bailey et. al (2018) ########
+drivers <- union(union(driver_LUAD_bailey,driver_LUSC_bailey), cgc_NSCLC)
+
+####### Filtrar drivers en archivos MAF de LUAD y LUSC ######
+LUAD_dri <- subsetMaf(LUAD_MAF, genes=c(drivers))
+LUSC_dri <- subsetMaf(LUSC_MAF, genes=c(drivers))
+```
+
+## 9. Visualización drivers frecuentemente más mutados:
+
+### 9.1. Oncoplot drivers LUAD:
+
+```{r}
+oncoplot(LUAD_dri)
+```
+
+### 9.2. Oncoplot drivers LUSC:
+
+```{r}
+oncoplot(LUSC_dri)
+# ====================== #
+# Guardar Oncoplot LUAD
+# ====================== #
+png("oncoplot_LUAD_driver.png", width = 5000, height = 3000, res = 400)
+
+oncoplot(
+  maf = LUAD_dri,
+  draw_titv = TRUE,
+
+  # Nombres genes
+  fontSize = 1.2,
+
+  # Leyendas
+  legendFontSize = 2,
+
+  # IDs muestras
+  SampleNamefontSize = 1.5,
+
+  # Barras laterales y superiores
+  annotationFontSize = 1.8,
+
+  # Título
+  titleText = "Oncoplot LUAD Drivers"
+)
+
+dev.off()
+
+
+# ====================== #
+# Guardar Oncoplot LUSC
+# ====================== #
+png("oncoplot_LUAD_driver.png", width = 2000, height = 2000, res = 200)
+
+oncoplot(
+  maf = LUAD_dri,
+  draw_titv = TRUE,
+
+
+  fontSize = 1.1,
+  legendFontSize = 2,
+  SampleNamefontSize = 1.5,
+  annotationFontSize = 1.8,
+
+)
+
+dev.off()
+
+driver_bailey
+```
+
+### 9.3. Visualización de los top 10 drivers más mutados entre pacientes de LUAD y LUSC: 
+
+```{r}
+coOncoplot(m1 = LUAD_dri,m2 = LUSC_dri, m1Name = "LUAD Drivers", m2Name = "LUSC Drivers")
+```
+
+En ambas cohortes TP53 sigue siendo el gen más mutado.
+
+## 10. Interacciones Somaticas:
+
+Gracias a somaticInteraction, permite ver que mutaciones generadas en las celulas tumorales tienden a mutar conjuntamente (co-ocurrencia) o no se suelen mutar conjuntamente (mutualmente exluyentes).
+
+```{r}
+si_luad <- somaticInteractions(LUAD_dri)
+si_lusc <- somaticInteractions(LUSC_dri)
+```
+
+Para el análisi se han cojido todas ellas mutaciones co-ocurrente significativas de p<0.05 (·) o p<0.01 (*).
+
+
+## 11. Clonalidad:
+
+Para realizar el gráfico VAF, hay que calcular el VAF ya que en los archivos MAF de LUSC y LUAD, no viene definido. Para ello utilizaremos la fórmula:
+
+$$
+VAF = \frac{t\_alt\_count}{t\_alt\_count + t\_ref\_count}
+$$
+
+<https://www.biostars.org/p/256086/>
+
+```{r}
+plotVaf(maf = LUAD_dri, vafCol = 'LUAD_VAF')
+
+plotVaf(maf = LUSC_dri, vafCol = 'LUSC_VAF')
+```
+
+
+## 12. Gene driver diferencialmente mutados entre LUAD y LUSC (Fisher's exact test):
+
+```{r}
+comp <- mafCompare(m1 = LUAD_dri, m2 = LUSC_dri, m1Name = 'LUAD', m2Name = 'LUSC', minMut = 40)
+
+forestPlot(mafCompareRes = comp, fdr = 0.05)
+
+```
+
+Se puede ver que en LUAD los genes que se encuentran diferencialmente mutados són: KRAS, STK11, EGFR, KEAP1, BRAF, SMARCA4, MGA. En LUSC se encuentran diferencialmente mutados: TP53, KMT2D, NFE2L2, PTEN, CDKN2A, PIK3CA, FAT1.
+
+## 13. Distribución posicional de los SNVs en los genes especificos de cada tumor:
+
+```{r}
+
+for (gene in comp$results$Hugo_Symbol[comp$results$adjPval <= 0.05] ) {
+  m1_top <- LUAD_dri@data[
+    Hugo_Symbol == gene,
+    .N,
+    by = HGVSp_Short
+  ][order(-N)][1, HGVSp_Short]
+
+  # LUSC: mutación más frecuente
+  m2_top <- LUSC_dri@data[
+    Hugo_Symbol == gene,
+    .N,
+    by = HGVSp_Short
+  ][order(-N)][1, HGVSp_Short]
+
+  # extraer posición numérica (ej: p.L858R -> 858)
+  m1_pos <- as.numeric(gsub(".*?(\\d+).*", "\\1", m1_top))
+  m2_pos <- as.numeric(gsub(".*?(\\d+).*", "\\1", m2_top))
+  
+  lollipopPlot2(m1 = LUAD_dri, m2 = LUSC_dri, m1_label=m1_pos,m2_label=m2_pos, gene = gene, AACol1 = "HGVSp_Short", AACol2 = "HGVSp_Short", m1_name = "LUAD", m2_name = "LUSC", verbose = FALSE, legendTxtSize = 1, showDomainLabel= FALSE)
+}
+
+for (gene in comp$results$Hugo_Symbol[comp$results$adjPval <= 0.05]) {
+
+  # LUAD: mutación más frecuente
+  m1_top <- LUAD_dri@data[
+    Hugo_Symbol == gene,
+    .N,
+    by = HGVSp_Short
+  ][order(-N)][1, HGVSp_Short]
+
+  # LUSC: mutación más frecuente
+  m2_top <- LUSC_dri@data[
+    Hugo_Symbol == gene,
+    .N,
+    by = HGVSp_Short
+  ][order(-N)][1, HGVSp_Short]
+
+  # extraer posición numérica
+  m1_pos <- as.numeric(gsub(".*?(\\d+).*", "\\1", m1_top))
+  m2_pos <- as.numeric(gsub(".*?(\\d+).*", "\\1", m2_top))
+
+  # imprimir labels
+  cat(
+    gene,
+    " -> LUAD:", m1_top, "(", m1_pos, ")",
+    "| LUSC:", m2_top, "(", m2_pos, ")",
+    "\n"
+  )
+
+  # nombre archivo
+  file_name <- paste0(gene, "_lollipopplot.png")
+
+  # guardar PNG
+  png(
+    filename = file_name,
+    width = 2000,
+    height = 1000,
+    res = 300
+  )
+
+  lollipopPlot2(
+    m1 = LUAD_dri,
+    m2 = LUSC_dri,
+    m1_label = m1_pos,
+    m2_label = m2_pos,
+    gene = gene,
+    AACol1 = "HGVSp_Short",
+    AACol2 = "HGVSp_Short",
+    m1_name = "LUAD",
+    m2_name = "LUSC",
+    verbose = FALSE,
+    legendTxtSize = 1,
+    showDomainLabel = FALSE
+  )
+
+  dev.off()
+}
+```
+
+
+## 14. Enrequicimiento de Pathways de los drivers característicos de cada tumor:
+
+Para hacer el enrequicimiento se ha utilizado ORA (Over-Represented Analysis), a partir dde los genes significativos (adjPval<0.05) asociados en cada tipo tumoral, resultado del test exacto de Fisher con mafCompare.
+
+A partir de Odds Ratio (OR), que mide la fuerza de la asociación entre ambas cohortes, valores mayores a 1 se asocian con LUAD y menores a 1 con LUSC. 
+
+```{r, fig.width=20, fig.height=12, warning=FALSE, message=FALSE}
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+library(ggplot2)
+
+# ====================== #
+# Extracción de genes significativos que se asocian a cada tumor:
+# ====================== #
+specific_luad_dri <- comp$results[comp$results$adjPval <= 0.05 & comp$results$or > 1]
+specific_luad_dri
+specific_lusc_dri <- comp$results[comp$results$adjPval <= 0.05 & comp$results$or < 1]
+
+# ====================== #
+# ORA (Over-Represented Analysis) LUAD:
+# ====================== #
+genes_entrez_luad <- bitr(
+  specific_luad_dri$Hugo_Symbol,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+)
+enrich_KEGG_luad <- enrichKEGG(genes_entrez_luad$ENTREZID,
+           organism = "hsa",
+           pAdjustMethod = "BH",
+           pvalueCutoff = 0.05)
+
+
+enrich_PC_luad <- enrichPC(
+  specific_luad_dri$Hugo_Symbol,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05
+)
+
+#### Graficación: ####
+(barplot(enrich_KEGG_luad,
+        showCategory = 15,
+        orderBy = "p.adjust") + theme(
+    axis.text.y = element_text(size = 19),  
+    axis.text.x = element_text(size = 19),
+    plot.title = element_text(size = 17, face = 'bold')
+  ) + ggtitle("Enrichment Pathways LUAD: KEGG")) + 
+  (barplot(enrich_PC_luad,
+        showCategory = 15,
+        orderBy = "p.adjust") + theme(
+    axis.text.y = element_text(size = 19),
+    axis.text.x = element_text(size = 19),
+    plot.title = element_text(size = 17, face = 'bold')
+  ) + ggtitle("Enrichment Pathways LUAD: Pathway Commons"))
+
+
+# ====================== #
+# ORA (Over-Represented Analysis) LUSC:
+# ====================== #
+genes_entrez_lusc <- bitr(
+  specific_lusc_dri$Hugo_Symbol,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+)
+enrich_KEGG_lusc<- enrichKEGG(genes_entrez_lusc$ENTREZID,
+           organism = "hsa",
+           pAdjustMethod = "BH",
+           pvalueCutoff = 0.05)
+
+
+enrich_PC_lusc <- enrichPC(
+  specific_lusc_dri$Hugo_Symbol,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05
+)
+
+#### Graficación: ####
+(barplot(enrich_KEGG_lusc,
+        showCategory = 15,
+        orderBy = "p.adjust") + theme(
+    axis.text.y = element_text(size = 19),  
+    axis.text.x = element_text(size = 19),
+    plot.title = element_text(size = 17, face = 'bold')
+  ) + ggtitle("Enrichment Pathways LUSC: KEGG")) + 
+  (barplot(enrich_PC_lusc,
+        showCategory = 15,
+        orderBy = "p.adjust") + theme(
+    axis.text.y = element_text(size = 19),
+    axis.text.x = element_text(size = 19),
+    plot.title = element_text(size = 17, face = 'bold')
+  ) + ggtitle("Enrichment Pathways LUSC: Pathway Commons"))
+
+```
+
+
+
+
+## 15. Análisi de supervivencia:
+
+### 15.1. Análisi de supervivencia de los genes driver especificos de cada tumor:
+
+```{r supervivencia, fig.width=10, fig.height=5, fig.align='center', results='hide', message=FALSE}
+#pdf("mafSurvival_LUAD_vs_LUSC.pdf", width = 10, height = 5)
+top20_LUAD_LUSC <- union(getGeneSummary(LUAD_dri)$Hugo_Symbol[1:20],getGeneSummary(LUSC_dri)$Hugo_Symbol[1:20])
+
+
+for (gene in top20_LUAD_LUSC) {
+  
+  par(mfrow = c(1,2), 
+      mar = c(5,4,2,2) + 0.1,  # márgenes dentro de cada gráfico
+      oma = c(0,0,3,0)) # 1 fila, 2 columnas
+  
+  mafSurvival(
+    maf = LUAD_dri,
+    genes = gene,
+    time = "CDR_OS.time",
+    Status = "CDR_OS",
+  )
+  title(main = paste(gene,"LUAD"), adj=1)
+
+  
+  mafSurvival(
+    maf = LUSC_dri,
+    genes = gene,
+    time = "CDR_OS.time",
+    Status = "CDR_OS",
+  )
+  title(main = paste(gene,"LUSC"), adj=1)
+
+}
+#dev.off()
+```
+
+
+### 15.2. Análisi supervivencia co-ocurrencia genes driver especificos a cada tumor:
+```{r, message=FALSE, warning=FALSE, results='hide'}
+co_occ_genes_LUAD <- subset(si_luad, pValue <= 0.05 & Event == "Co_Occurence")$pair
+co_occ_genes_LUAD <- str_split(str_split(co_occ_genes_LUAD, pattern = "\\|"), ",\\s*")
+
+par(mfrow = c(1,2), 
+      mar = c(5,4,2,2) + 0.1,  # márgenes dentro de cada gráfico
+      oma = c(0,0,3,0)) # 1 fila, 2 columnas
+for (pair in co_occ_genes_LUAD) {
+  mafSurvGroup(
+  maf = LUAD_dri,
+  geneSet = pair,    # genes combinados
+  time = "CDR_OS.time",     # columna de tiempo
+  Status = "CDR_OS",        # columna de evento
+  minMut = 10                # opcional: solo genes con >=5 mutantes
+)
+  
+}
+
+co_occ_genes_LUSC <- subset(si_lusc, pValue <= 0.05 & Event == "Co_Occurence")$pair
+co_occ_genes_LUSC <- str_split(str_split(co_occ_genes_LUSC, pattern = "\\|"), ",\\s*")
+
+for (pair in co_occ_genes_LUSC) {
+  mafSurvGroup(
+  maf = LUSC_dri,
+  geneSet = pair,    # genes combinados
+  time = "CDR_OS.time",     # columna de tiempo
+  Status = "CDR_OS",        # columna de evento
+  minMut = 10                # opcional: solo genes con >=5 mutantes
+)
+  
+}
+
+```
+
+```{r}
+
+#Extracción muestras wt y mut para cada gen de lusc:
+# =========================================================
+# 1. FUNCIÓN GENERAL (REUTILIZABLE)
+# =========================================================
+
+get_mut_wt_matrix <- function(maf, genes, samples){
+
+  maf_data <- maf@data
+
+  mutation_lists <- list()
+
+  # -----------------------------
+  # 1. calcular MUT/WT por gen
+  # -----------------------------
+  for(gene in genes){
+
+    mut_samples <- unique(
+      maf_data$Tumor_Sample_Barcode[
+        maf_data$Hugo_Symbol == gene
+      ]
+    )
+
+    wt_samples <- setdiff(samples, mut_samples)
+
+    mutation_lists[[gene]] <- list(
+      MUT = mut_samples,
+      WT = wt_samples
+    )
+  }
+
+  # -----------------------------
+  # 2. construir matriz final
+  # -----------------------------
+  mut_matrix <- data.frame(
+    Tumor_Sample_Barcode = samples
+  )
+
+  for(gene in genes){
+
+    mut_samples <- mutation_lists[[gene]]$MUT
+
+    mut_matrix[[paste0(gene, "_status")]] <-
+      ifelse(
+        samples %in% mut_samples,
+        "MUT",
+        "WT"
+      )
+  }
+
+  return(mut_matrix)
+}
+
+# =========================================================
+# 2. LUAD
+# =========================================================
+
+luad_samples <- unique(LUAD_MAF@data$Tumor_Sample_Barcode)
+
+luad_genes <- unique(
+  as.character(specific_luad_dri$Hugo_Symbol)
+)
+
+luad_mut_matrix <- get_mut_wt_matrix(
+  maf = LUAD_MAF,
+  genes = luad_genes,
+  samples = luad_samples
+)
+
+# =========================================================
+# 3. LUSC
+# =========================================================
+
+lusc_samples <- unique(LUSC_MAF@data$Tumor_Sample_Barcode)
+
+lusc_genes <- unique(
+  as.character(specific_lusc_dri$Hugo_Symbol)
+)
+
+lusc_mut_matrix <- get_mut_wt_matrix(
+  maf = LUSC_MAF,
+  genes = lusc_genes,
+  samples = lusc_samples
+)
+
+
+write.csv(
+  luad_mut_matrix,
+  file = "LUAD_mut_wt_matrix.csv",
+  row.names = FALSE
+)
+write.csv(
+  lusc_mut_matrix,
+  file = "LUSC_mut_wt_matrix.csv",
+  row.names = FALSE
+)
+```
+
+# Análisis validatório con AACR GENIE BPC:  v2.0-public
+
+## 1. Obtención y preparación de los datos:
+
+```{r, message=FALSE, include=FALSE}
+# ====================== #
+# Establecer token de acceso a los datos:
+# ====================== #
+library(genieBPC)
+
+set_synapse_credentials(pat = "eyJ0eXAiOiJKV1QiLCJraWQiOiJXN05OOldMSlQ6SjVSSzpMN1RMOlQ3TDc6M1ZYNjpKRU9VOjY0NFI6VTNJWDo1S1oyOjdaQ0s6RlBUSCIsImFsZyI6IlJTMjU2In0.eyJhY2Nlc3MiOnsic2NvcGUiOlsidmlldyIsImRvd25sb2FkIl0sIm9pZGNfY2xhaW1zIjp7fX0sInRva2VuX3R5cGUiOiJQRVJTT05BTF9BQ0NFU1NfVE9LRU4iLCJpc3MiOiJodHRwczovL3JlcG8tcHJvZC5wcm9kLnNhZ2ViYXNlLm9yZy9hdXRoL3YxIiwiYXVkIjoiMCIsIm5iZiI6MTc3ODI1Nzg2MCwiaWF0IjoxNzc4MjU3ODYwLCJqdGkiOiIzNzE1NyIsInN1YiI6IjM1ODgxMjMifQ.OmvaS0ZGy8tHzereWemhCxAnguKYItkTYkNrhEJ5lr14KW06kmAgeYoitIA6A06svfKi1shTmlKvb8ktZsZEE1HU1kXRN9lGVePfYO0SGeGy1CdO56tLtjqVQ88OUx96nbry1dN_bUwnILjHLoNyop0CMCZzg2jMIT-ZYHagQh3y9qPHq1erJN6BBM8rIdvbLfjcuaayYweNdb2-TfEIPBp3O_LVB3d0sG-Yg6GdnW8iiucpw-Eheh5eDcFuKuIA4ciMcDJCGTgN6SRfkrwhq7RI4zeQaqFbQvpUQGtWlYd4Hii0ystr-_osdmhtkV7C67caajvZz4b0RB0Rzm8UWg")
+```
+
+```{r, message=FALSE}
+# ====================== #
+# Descargar datos de NSCLC v2.0-public:
+# ====================== #
+synapse_version()
+nsclc_2_0 <- pull_data_synapse("NSCLC", version = "v2.0-public")
+
+
+# ====================== #
+# Filtrar muestras NSCLC por OncoTree (LUAD y LUSC), más riguroso que por histology, y tipo mutacional:
+# ====================== #
+#https://academic.oup.com/bioinformatics/article/40/Supplement_1/i140/7700849?utm_source=chatgpt.com&login=false
+#https://link.springer.com/article/10.1186/s12890-024-03124-4?utm_source=chatgpt.com
+
+#   1. Selección los id de las muestras con OncoTree LUAD y LUSC:
+nsclc_LUAD_oncotree <- nsclc_2_0$NSCLC_v2.0$cpt %>% filter(cpt_oncotree_code == "LUAD")
+LUAD_sample <- nsclc_LUAD_oncotree$cpt_genie_sample_id
+
+nsclc_LUSC_oncotree <- nsclc_2_0$NSCLC_v2.0$cpt %>% filter(cpt_oncotree_code == "LUSC")
+LUSC_sample <- nsclc_LUSC_oncotree$cpt_genie_sample_id
+
+#   2. Filtrar los datos mutacionales que correspondan a muestras OncoTree LUAD y LUSC:
+mut_lusc <- nsclc_2_0$NSCLC_v2.0$mutations_extended %>% filter(Tumor_Sample_Barcode %in% LUSC_sample)
+
+mut_luad <- nsclc_2_0$NSCLC_v2.0$mutations_extended %>% filter(Tumor_Sample_Barcode %in% LUAD_sample)
+
+
+#   3. Filtrar los datos mutacionales con las mutaciones no sinónimas:
+nonsynonymous <- c(
+  "Missense_Mutation",
+  "Nonsense_Mutation",
+  "Frame_Shift_Del",
+  "Frame_Shift_Ins",
+  "Splice_Site",
+  "In_Frame_Del",
+  "In_Frame_Ins",
+  "Nonstop_Mutation",
+  "Translation_Start_Site"
+)
+mut_lusc_ns <- mut_lusc %>% filter(Variant_Classification %in% nonsynonymous)
+mut_luad_ns <- mut_luad %>% filter(Variant_Classification %in% nonsynonymous)
+
+# ====================== #
+# Comprobar que las variantes son PASS:
+# ====================== #
+
+table(mut_luad_ns$FILTER)
+table(mut_lusc_ns$FILTER)
+
+# ====================== #
+# Convertir datos mutacionales a MAF:
+library(maftools)
+# ====================== #
+maf_luad_ns <- read.maf(mut_luad_ns)
+oncoplot(maf_luad_ns)
+maf_lusc_ns<- read.maf(mut_lusc_ns)
+oncoplot(maf_lusc_ns)
+
+# ====================== #
+# Filtrar los MAF por los drivers estudiados:
+# ====================== #
+maf_luad_ns_driver <- subsetMaf(maf_luad_ns, genes=c(drivers))
+maf_lusc_ns_driver <- subsetMaf(maf_lusc_ns, genes=c(drivers))
+```
+
+
+
+## 2. Visualización general frecuencia mutacionales y variantes de los drivers de LUAD y LUSC:
+
+### 2.1. Resumen general de las variantes mutacionales:
+
+```{r}
+#LUAD:
+plotmafSummary(maf_luad_ns_driver, rmOutlier = TRUE, addStat = 'median', dashboard = TRUE, titvRaw = FALSE)
+```
+
+```{r}
+#LUSC:
+plotmafSummary(maf_lusc_ns_driver, rmOutlier = TRUE, addStat = 'median', dashboard = TRUE, titvRaw = FALSE)
+```
+
+### 2.2. Oncoplots LUAD:
+
+```{r, message=FALSE}
+#Oncoplot de los drivers:
+oncoplot(maf_luad_ns_driver)
+```
+
+### 2.3. Oncoplots LUSC:
+```{r, message=FALSE}
+oncoplot(maf_lusc_ns_driver)
+```
+
+
+### 2.4. Top 10 genes más mutados: Co-Oncoplot
+```{r,fig.width=15, fig.height=7, fig.align="center"}
+coOncoplot(m1=maf_luad_ns_driver,m2=maf_lusc_ns_driver,m1Name = "LUAD Drivers", m2Name = "LUSC Drivers",removeNonMutated=TRUE,geneNamefont=1)
+```
+
+## 3. Interacciones somáticas:
+
+```{r}
+# ====================== #
+# Interacciones somáticas en LUAD:
+# ====================== #
+si_luad_ns <- somaticInteractions(maf_luad_ns_driver)
+
+# ====================== #
+# Interacciones somáticas en LUSC:
+# ====================== #
+si_lusc_ns <- somaticInteractions(maf_lusc_ns_driver)
+```
+
+
+## 4. Clonalidad de los genes driver:
+
+```{r}
+# ====================== #
+# Cálculo de VAF para LUAD y LUSC:
+# ====================== #
+maf_luad_ns_driver@data$LUAD_VAF <- maf_luad_ns_driver@data$t_alt_count / (maf_luad_ns_driver@data$t_alt_count + maf_luad_ns_driver@data$t_ref_count)
+
+maf_lusc_ns_driver@data$LUSC_VAF <- maf_lusc_ns_driver@data$t_alt_count / (maf_lusc_ns_driver@data$t_alt_count + maf_lusc_ns_driver@data$t_ref_count)
+
+# ====================== #
+# Graficación de los genes con mayor VAF score:
+# ====================== #
+plotVaf(maf = maf_luad_ns_driver, vafCol = 'LUAD_VAF')
+
+plotVaf(maf = maf_lusc_ns_driver, vafCol = 'LUSC_VAF')
+
+```
+
+
+## 5. Estudio de significáncia mutacional asociada a cada cohorte:
+
+```{r}
+comp1 <- mafCompare(m1 = maf_luad_ns_driver, m2 = maf_lusc_ns_driver, m1Name = 'LUAD', m2Name = 'LUSC', minMut = 40)
+forestPlot(mafCompareRes = comp1, fdr = 0.05)
+
+```
+
+
+## 6. Dominios proteïcos afectados de los genes diferencialmente mutados de cada cohorte:
+
+```{r}
+for (gene in comp1$results$Hugo_Symbol[comp$results$adjPval <= 0.05] ) {
+  lollipopPlot2(m1 =maf_luad_ns_driver , m2 = maf_lusc_ns_driver, gene = gene, AACol1 = "HGVSp_Short", AACol2 = "HGVSp_Short", m1_name = "LUAD", m2_name = "LUSC", verbose = FALSE, legendTxtSize = 1, showDomainLabel= FALSE)
+}
+for (gene in comp1$results$Hugo_Symbol[comp1$results$adjPval <= 0.05]) {
+
+  # =========================
+  # LUAD
+  # =========================
+
+  m1_counts <- maf_luad_ns_driver@data[
+    Hugo_Symbol == gene,
+    .N,
+    by = HGVSp_Short
+  ][order(-N)]
+
+  m1_top <- m1_counts[1, HGVSp_Short]
+
+  # posición numérica
+  m1_label <- as.numeric(gsub(".*?(\\d+).*", "\\1", m1_top))
+
+  # todas las mutaciones en esa posición
+  m1_same_pos <- unique(
+    maf_luad_ns_driver@data[
+      Hugo_Symbol == gene &
+      grepl(paste0("\\D", m1_label, "\\D|\\D", m1_label, "$"), HGVSp_Short),
+      HGVSp_Short
+    ]
+  )
+
+  # =========================
+  # LUSC
+  # =========================
+
+  m2_counts <- maf_lusc_ns_driver@data[
+    Hugo_Symbol == gene,
+    .N,
+    by = HGVSp_Short
+  ][order(-N)]
+
+  m2_top <- m2_counts[1, HGVSp_Short]
+
+  # posición numérica
+  m2_label <- as.numeric(gsub(".*?(\\d+).*", "\\1", m2_top))
+
+  # todas las mutaciones en esa posición
+  m2_same_pos <- unique(
+    maf_lusc_ns_driver@data[
+      Hugo_Symbol == gene &
+      grepl(paste0("\\D", m2_label, "\\D|\\D", m2_label, "$"), HGVSp_Short),
+      HGVSp_Short
+    ]
+  )
+
+  # =========================
+  # imprimir
+  # =========================
+
+  cat(
+    "\n",
+    gene,
+    "\nLUAD posición:", m1_label,
+    "\nMutaciones:", paste(m1_same_pos, collapse = ", "),
+    "\nLUSC posición:", m2_label,
+    "\nMutaciones:", paste(m2_same_pos, collapse = ", "),
+    "\n"
+  )
+
+  # =========================
+  # guardar plot
+  # =========================
+
+
+  lollipopPlot2(
+    m1 = maf_luad_ns_driver,
+    m2 = maf_lusc_ns_driver,
+    gene = gene,
+    AACol1 = "HGVSp_Short",
+    AACol2 = "HGVSp_Short",
+    m1_label = m1_label,
+    m2_label = m2_label,
+    m1_name = "LUAD",
+    m2_name = "LUSC",
+    verbose = FALSE,
+    legendTxtSize = 1,
+    showDomainLabel = FALSE
+  )
+
+
+}
+
+```
+
+
+## 7. Enrequicimiento funcional (Pathways) de los genes diferencialmente mutados: ORA
+
+```{r, fig.width=20, fig.height=12, warning=FALSE, message=FALSE}
+# ====================== #
+# Selección genes diferencialmente mutados para cada cohorte
+# ====================== #
+luad_dri_ns <- comp1$results[comp1$results$adjPval <= 0.05 & comp1$results$or > 1]
+lusc_dri_ns <- comp1$results[comp1$results$adjPval <= 0.05 & comp1$results$or < 1]
+
+# ====================== #
+# ORA (Over-Represented Analysis) LUAD:
+# ====================== #
+#   1. Extracción ENTEREZID:
+genes_entrez_luad_ns <- bitr(
+  luad_dri_ns$Hugo_Symbol,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+)
+
+#   2. Enrequicimiento con KEGG:
+enrich_KEGG_luad_ns <- enrichKEGG(genes_entrez_luad_ns$ENTREZID,
+           organism = "hsa",
+           pAdjustMethod = "BH",
+           pvalueCutoff = 0.05)
+
+#  3. Enrequicimiento con PC (Pathway Commons):
+enrich_PC_luad_ns <- enrichPC(
+  luad_dri_ns$Hugo_Symbol,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05
+)
+
+#   4. Graficación:
+(barplot(enrich_KEGG_luad_ns,
+        showCategory = 15,
+        orderBy = "p.adjust") + theme(
+    axis.text.y = element_text(size = 19),  
+    axis.text.x = element_text(size = 19),
+    plot.title = element_text(size = 17, face = 'bold')
+  ) + ggtitle("Enrichment Pathways LUAD: KEGG")) + 
+  (barplot(enrich_PC_luad_ns,
+        showCategory = 15,
+        orderBy = "p.adjust") + theme(
+    axis.text.y = element_text(size = 19),
+    axis.text.x = element_text(size = 19),
+    plot.title = element_text(size = 17, face = 'bold')
+  ) + ggtitle("Enrichment Pathways LUAD: Pathway Commons"))
+
+
+# ====================== #
+# ORA (Over-Represented Analysis) LUSC:
+# ====================== #
+#   1. Extracción ENTEREZID:
+genes_entrez_lusc_ns <- bitr(
+  lusc_dri_ns$Hugo_Symbol,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+)
+
+#   2. Enrequicimiento con KEGG:
+enrich_KEGG_lusc_ns<- enrichKEGG(genes_entrez_lusc_ns$ENTREZID,
+           organism = "hsa",
+           pAdjustMethod = "BH",
+           pvalueCutoff = 0.05)
+
+#  3. Enrequicimiento con PC (Pathway Commons):
+enrich_PC_lusc_ns <- enrichPC(
+  lusc_dri_ns$Hugo_Symbol,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05
+)
+
+#   4. Graficación:
+(barplot(enrich_KEGG_lusc_ns,
+        showCategory = 15,
+        orderBy = "p.adjust") + theme(
+    axis.text.y = element_text(size = 19),  
+    axis.text.x = element_text(size = 19),
+    plot.title = element_text(size = 17, face = 'bold')
+  ) + ggtitle("Enrichment Pathways LUSC: KEGG")) + 
+  (barplot(enrich_PC_lusc_ns,
+        showCategory = 15,
+        orderBy = "p.adjust") + theme(
+    axis.text.y = element_text(size = 19),
+    axis.text.x = element_text(size = 19),
+    plot.title = element_text(size = 17, face = 'bold')
+  ) + ggtitle("Enrichment Pathways LUSC: Pathway Commons"))
+
+```
+
+
