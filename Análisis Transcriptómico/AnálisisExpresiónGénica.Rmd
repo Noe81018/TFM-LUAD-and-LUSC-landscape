@@ -1,0 +1,2432 @@
+---
+title: "Análisis de Expresión Génica"
+author: 'Noé Gragera Jiménez'
+subtitle: '`r params$subtitulo`'
+date: '`r format(Sys.Date(),"%e de %B, %Y")`' 
+# date: \today  (solo para pdf)
+output:
+  html_document:
+    theme: united
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    keep_tex: no
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+nocite: |
+  @lantz2015machine
+  @max2017caret
+lang: es
+params:
+  subtitulo: Detección de expresión diferencial entre LUAD y LUSC
+geometry: margin=2cm
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. Obteción de Datos con TCGAbiolinks:
+
+Para acceder a los datos de bulk RNA-seq, tanto de LUAS como LUAD, se utiliza TCGAbiolinks:
+
+```{r, warning=FALSE, message=FALSE, results='hide'}
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(dplyr)
+library(here)
+
+#LUAD DATA:
+# Cargar datos adeocarcinoma pulmonar (LUAD):
+LUAD_query <-  GDCquery(
+  project = "TCGA-LUAD",
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  workflow.type = "STAR - Counts"
+)
+
+GDCdownload(LUAD_query)
+
+# Obtener SummarizedExperimet de LUAD:
+LUAD_data_bulkRNA <- GDCprepare(LUAD_query)
+saveRDS(LUAD_data_bulkRNA,"/Users/noegragerajimenez/Documents/TFM/Analysis RStudio/Scripts/Análisis Transcriptómico/bulkRNAseq_data/LUAD_SummarizedExperiment.rds")
+
+################################################################################
+
+#LUSC DATA:
+# Cargar datos carcinoma escamoso pulmonar (LUSC):
+LUSC_query <- GDCquery(project = "TCGA-LUSC",
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  workflow.type = "STAR - Counts")
+
+GDCdownload(LUSC_query)
+
+# Obtener Summarized experiment de LUSC:
+LUSC_data_bulkRNA <- GDCprepare(LUSC_query)
+saveRDS(LUSC_data_bulkRNA,"/Users/noegragerajimenez/Documents/TFM/Analysis RStudio/Scripts/Análisis Transcriptómico/bulkRNAseq_data/LUSC_SummarizedExperiment.rds")
+```
+
+
+# 2. Tractamiento de los Summarized Experiments:
+
+```{r}
+library(janitor)
+library(org.Hs.eg.db)
+
+#Leer SummarizedExperiment:
+LUAD_bulkRNA_complete <- readRDS("/Users/noegragerajimenez/Documents/TFM/Analysis RStudio/Scripts/Análisis Transcriptómico/bulkRNAseq_data/LUAD_SummarizedExperiment.rds")
+LUSC_bulkRNA_complete <- readRDS("/Users/noegragerajimenez/Documents/TFM/Analysis RStudio/Scripts/Análisis Transcriptómico/bulkRNAseq_data/LUSC_SummarizedExperiment.rds")
+
+#Filtrar por muestras tumorales:
+LUAD_bulkRNA <- LUAD_bulkRNA_complete[ ,LUAD_bulkRNA_complete$shortLetterCode=="TP"]
+LUSC_bulkRNA <- LUSC_bulkRNA_complete[ ,LUSC_bulkRNA_complete$shortLetterCode=="TP"]
+
+#Extracción de matrices de conteos:
+LUAD_mat <- assay(LUAD_bulkRNA)
+LUSC_mat <- assay(LUSC_bulkRNA)
+
+
+# Cambiar ensembl a Sympol de LUAD:
+LUAD_genes<- rownames(LUAD_mat) %>%
+  tibble::enframe() %>%
+  mutate(ENSEMBL =stringr::str_replace(value, "\\.[0-9]+", ""))
+
+
+
+LUAD_gene_map<- clusterProfiler::bitr(LUAD_genes$ENSEMBL,
+                                           fromType = "ENSEMBL",
+                                           toType = "SYMBOL",
+                                           OrgDb = org.Hs.eg.db) %>%
+  distinct(SYMBOL, .keep_all = TRUE) 
+
+
+LUAD_gene_map<- LUAD_gene_map %>%
+  left_join(LUAD_genes)
+
+
+LUAD_mat<- LUAD_mat[LUAD_gene_map$value, ]
+row.names(LUAD_mat)<- LUAD_gene_map$SYMBOL
+
+#############################################
+
+LUSC_genes<- rownames(LUSC_mat) %>%
+  tibble::enframe() %>%
+  mutate(ENSEMBL =stringr::str_replace(value, "\\.[0-9]+", ""))
+
+
+LUSC_gene_map<- clusterProfiler::bitr(LUSC_genes$ENSEMBL,
+                                           fromType = "ENSEMBL",
+                                           toType = "SYMBOL",
+                                           OrgDb = org.Hs.eg.db) %>%
+  distinct(SYMBOL, .keep_all = TRUE) 
+
+
+LUSC_gene_map<- LUSC_gene_map %>%
+  left_join(LUSC_genes)
+
+
+LUSC_mat<- LUSC_mat[LUSC_gene_map$value, ]
+row.names(LUSC_mat)<- LUSC_gene_map$SYMBOL
+```
+
+
+```{r}
+#Comprobación de que son los mismos genes:
+all.equal(rownames(LUAD_mat), rownames(LUSC_mat))
+```
+
+# 3. Graficación perfiles tumorales (TP) LUSC y LUAD con PCA:
+```{r}
+library(ggfortify)
+library(DESeq2)
+
+lung_mat<- cbind(LUAD_mat, LUSC_mat)
+lung_meta<- data.frame(cancer_type = c(rep( "LUAD", ncol(LUAD_mat)), 
+                   rep("LUSC", ncol(LUSC_mat))))
+
+rownames(lung_meta) <- c(colnames(LUAD_mat), colnames(LUSC_mat)) #CHATOMICS esta al reves error!!
+
+
+##---CPM Transformation---##
+cpm <- edgeR::cpm(lung_mat, log = TRUE, prior.count = 1)
+
+#Seleccionar genes más variables: los 1000 primeros
+gene_idx <- order(rowVars(cpm), decreasing = TRUE)[1:1000]
+cpm_sub <- cpm[gene_idx, ]
+
+#PCA generica según los carcinomas:
+pca <- prcomp(t(cpm_sub), scale. = TRUE)
+autoplot(pca, data = lung_meta, color="cancer_type")
+head(sort(abs(pca$rotation[,1]), decreasing = TRUE), 20)
+```
+
+# 4. Cluster Jerárquico de perfiles tumorales (control calidad):
+```{r}
+cols <- ifelse(lung_meta$cancer_type == "LUAD", "red", "blue")
+n <- length(cols)
+
+#Hacer cluster jerarquico:
+hc <- hclust(dist(scale(t(cpm_sub))), method = "complete")
+
+#Especificar panel donde iran ambos plots:
+layout(matrix(c(1, 2), nrow = 2), heights = c(4, 0.8))
+
+#Graficar hclust:
+par(mar = c(0, 4, 4, 2)) 
+plot(hc, labels = FALSE, main = "Clustering muestras tumorales")
+
+#Graficar barra muestral:
+par(mar = c(2, 4, 0, 2))
+plot(NULL, xlim = c(1, n), ylim = c(0, 1), 
+     axes = FALSE, ann = FALSE) #grafico vacio con limites igual al número de muestras para que encaje (xlim)
+rect(xleft = 1:n -0.5, 
+     xright = 1:n +0.5,
+     ybottom = 0, 
+     ytop = 1, 
+     col = cols[hc$order],
+     border = NA) #rectangulo que rellenará el plot vacío
+mtext("cancer_type", side = 2, at = 0.5, las = 1, cex = 0.8)
+```
+
+
+# 5. Proyectar biomarcadores especificos de cada tumor en PCA:
+A continuación, para metodo de control y visualizar más en detalle las diferencias de cada carcinoma, se graficará las PCA en función del nivel de expresón
+https://pmc.ncbi.nlm.nih.gov/articles/PMC8233431/ genes biomarcadores para LUAD y LUSC:
+
+```{r pca_biomarkers, fig.width=18, fig.height=7, fig.align='center'}
+
+#------------------PCA DE BIOMARCADORES DE LUAD------------------#
+
+# 1. Poner conteos transformados cpm en metadata:
+lung_meta$MUC1 <- cpm["MUC1",]
+lung_meta$QSOX1 <- cpm["QSOX1",]
+lung_meta$ELFN2 <- cpm["ELFN2",]
+
+#2. Graficar:
+#MUC1:
+lung_meta$MUC1 <- pmin(lung_meta$MUC1, 16) 
+MUC1_PCA <- autoplot(pca, data = lung_meta , color ="MUC1") +
+  scale_color_viridis_b() +
+  facet_wrap(~ cancer_type) + 
+  ggtitle("TCGA NSCLC - MUC1 (LUAD Biomarker)") + 
+  theme(plot.title = element_text(size = 15, face = "bold"))
+ 
+#QSOX1:
+lung_meta$QSOX1 <- pmin(lung_meta$QSOX1, 16) 
+QSOX1_PCA <- autoplot(pca, data = lung_meta , color ="QSOX1") +
+  scale_color_viridis_b() +
+  facet_wrap(~ cancer_type) + 
+  ggtitle("TCGA NSCLC - QSOX1 (LUAD Biomarker)") + 
+  theme(plot.title = element_text(size = 15, face = "bold"))
+
+#ELFN2:
+lung_meta$ELFN2 <- pmin(lung_meta$ELFN2, 10) 
+ELFN2_PCA <- autoplot(pca, data = lung_meta , color ="ELFN2") +
+  scale_color_viridis_b() +
+  facet_wrap(~ cancer_type) + 
+  ggtitle("TCGA NSCLC - ELFN2 (LUAD Biomarker)") + 
+  theme(plot.title = element_text(size = 15, face = "bold"))
+
+#-----------------------------------------------------------------------------#
+
+#------------------PCA DE BIOMARCADORES DE LUSC:------------------#
+
+# 1. Poner los conteos transformados a vsf en metadata:
+lung_meta$NECTIN1 <- cpm["NECTIN1",]
+lung_meta$TP63 <- cpm["TP63",] 
+lung_meta$KRT5 <- cpm["KRT5",]
+
+#2. Graficar:
+#NECTIN1:
+lung_meta$NECTIN1 <- pmin(lung_meta$NECTIN1, 16) 
+NECTIN1_PCA <- autoplot(pca, data = lung_meta , color ="NECTIN1") +
+  scale_color_viridis_b() +
+  facet_wrap(~ cancer_type) + 
+  ggtitle("TCGA NSCLC - NECTIN1 (LUSC Biomarker)") + 
+  theme(plot.title = element_text(size = 15, face = "bold"))
+
+#TP63:
+lung_meta$TP63 <- pmin(lung_meta$TP63, 15)
+TP63_PCA <- autoplot(pca, data = lung_meta , color ="TP63") +
+  scale_color_viridis_b() +
+  facet_wrap(~ cancer_type) + 
+  ggtitle("TCGA NSCLC - TP63 (LUSC Biomarker)") + 
+  theme(plot.title = element_text(size = 15, face = "bold"))
+
+#KRT5:
+lung_meta$KRT5 <- pmin(lung_meta$KRT5,15)
+KRT5_PCA <- autoplot(pca, data = lung_meta , color ="KRT5") +
+  scale_color_viridis_b() + 
+  facet_wrap(~ cancer_type) + 
+  ggtitle("TCGA NSCLC - KRT5 (LUSC Biomarker)") + 
+  theme(plot.title = element_text(size = 15, face = "bold"))
+
+
+#------------------GRAFICACIÓN CONJUNTA------------------#
+library(patchwork)
+combined_plot <- (MUC1_PCA | QSOX1_PCA | ELFN2_PCA) / (NECTIN1_PCA | TP63_PCA | KRT5_PCA)
+combined_plot
+```
+
+
+
+# 6. EdgeR DEA (Differential expresion Analysis): TP/NT
+
+Para visualizar que genes se sobreexpresan en cada tumor, se ha obtado por realizar en cada caso comparaciones muestrales Tumor vs Normal.
+
+## 6.1. Selección de muestras TP y NT, y conseguir SYMBOL:
+```{r}
+####################
+# Selección de muestras TP y NT:
+####################
+
+LUAD_bulkRNA_NT_TP <- LUAD_bulkRNA_complete[ ,LUAD_bulkRNA_complete$shortLetterCode %in% c("TP","NT")]
+LUSC_bulkRNA_NT_TP <- LUSC_bulkRNA_complete[ ,LUSC_bulkRNA_complete$shortLetterCode %in% c("TP","NT")]
+
+# Matriz de expresión
+LUAD_mat_NT_TP <- assay(LUAD_bulkRNA_NT_TP)
+LUSC_mat_NT_TP <- assay(LUSC_bulkRNA_NT_TP)
+
+#########################
+# Mapear Ensembl a SYMBOL
+#########################
+# 1.Mapeo en LUAD:
+
+LUAD_genes_NT_TP<- rownames(LUAD_mat_NT_TP) %>%
+  tibble::enframe() %>%
+  mutate(ENSEMBL =stringr::str_replace(value, "\\.[0-9]+", ""))
+
+
+LUAD_gene_map_NT_TP<- clusterProfiler::bitr(LUAD_genes_NT_TP$ENSEMBL,
+                                           fromType = "ENSEMBL",
+                                           toType = "SYMBOL",
+                                           OrgDb = org.Hs.eg.db) %>%
+  distinct(SYMBOL, .keep_all = TRUE) 
+
+
+LUAD_gene_map_NT_TP<- LUAD_gene_map_NT_TP %>%
+  left_join(LUAD_genes_NT_TP)
+
+
+LUAD_mat_NT_TP<- LUAD_mat_NT_TP[LUAD_gene_map_NT_TP$value, ]
+row.names(LUAD_mat_NT_TP)<- LUAD_gene_map_NT_TP$SYMBOL
+
+
+# 2. Mapeo en LUSC:
+LUSC_genes_NT_TP<- rownames(LUSC_mat_NT_TP) %>%
+  tibble::enframe() %>%
+  mutate(ENSEMBL =stringr::str_replace(value, "\\.[0-9]+", ""))
+
+
+LUSC_gene_map_NT_TP<- clusterProfiler::bitr(LUSC_genes_NT_TP$ENSEMBL,
+                                           fromType = "ENSEMBL",
+                                           toType = "SYMBOL",
+                                           OrgDb = org.Hs.eg.db) %>%
+  distinct(SYMBOL, .keep_all = TRUE) 
+
+
+LUSC_gene_map_NT_TP<- LUSC_gene_map_NT_TP %>%
+  left_join(LUSC_genes_NT_TP)
+
+
+LUSC_mat_NT_TP<- LUSC_mat_NT_TP[LUSC_gene_map_NT_TP$value, ]
+row.names(LUSC_mat_NT_TP)<- LUSC_gene_map_NT_TP$SYMBOL
+
+#####################
+# Creación meta data:
+#####################
+luad_meta_NT_TP <- as.data.frame(colData(LUAD_bulkRNA_NT_TP))
+lusc_meta_NT_TP <- as.data.frame(colData(LUSC_bulkRNA_NT_TP))
+
+all(colnames(LUAD_mat_NT_TP) == luad_meta_NT_TP$barcode)
+all(colnames(LUSC_mat_NT_TP) == lusc_meta_NT_TP$barcode)
+
+```
+
+
+## 6.2. EgdeR LUAD (TP vs NT):
+
+```{r}
+library(edgeR)
+library(EnhancedVolcano)
+
+# =========================
+# EdgeR con datos de LUAD
+# =========================
+dge_luad <- DGEList(counts = LUAD_mat_NT_TP, group = factor(luad_meta_NT_TP$shortLetterCode))
+keep_luad <- filterByExpr(dge_luad)
+dge1_luad <- dge_luad[keep_luad,,keep.lib.size=FALSE]
+
+# Normalización TMM y comprobación:
+dge_luad <- normLibSizes(dge1_luad,"TMM") # normalizción de datos por TMM
+
+   ## Graficación de normalización:
+plot(dge_luad$samples$norm.factors, main="Normalization Factors")
+
+boxplot(cpm(dge_luad, log=TRUE)[, 1:200],
+        las = 2,
+        main = "5 muestras (eje X)")
+
+# PlotMDS: Comporbar que se separen las muestras:
+col_er_luad <- as.factor(dge_luad$samples$group)
+levels(col_er_luad) <- c("blue","red")
+col_er_luad <- as.character(col_er_luad)
+plotMDS(cpm(dge_luad, log=TRUE, prior.count=1), labels=NULL, pch=1, col=col_er_luad)
+
+# Establecer diseño del modelo:
+group_luad <- factor(dge_luad$samples$group)
+group_luad <- relevel(group_luad, ref="NT")
+design_luad <- model.matrix(~ group_luad)
+
+
+# Estimar dispersión:
+dge_luad <- estimateDisp(dge_luad, design_luad)
+plotBCV(dge_luad, main="Dispersion estimates and adjustment")
+
+
+# Ajustar modelo:
+fit_luad <- glmQLFit(dge_luad, design_luad)
+qlf_luad <- glmQLFTest(fit_luad, coef = 2) # Compara TP vs NT
+
+# Resultados:
+results_edgeR_luad <- topTags(qlf_luad, n = Inf)$table
+results_edgeR_luad <- results_edgeR_luad %>% 
+  tibble::rownames_to_column("SYMBOL")
+
+
+
+# =========================
+# Volcano Plot LUAD (TP vs NT)
+# =========================
+
+set.seed(1234)
+
+# 1.Seleccionar top genes up y downregulated:
+top_up_luad <- results_edgeR_luad %>%
+  dplyr::filter(FDR < 0.05,logFC > 1.5) %>%
+  dplyr::arrange(desc(logFC)) %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::pull(SYMBOL)
+
+top_down_luad <- results_edgeR_luad %>%
+  dplyr::filter(FDR < 0.05,logFC < -1.5) %>%
+  dplyr::arrange(logFC) %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::pull(SYMBOL)
+
+top_genes_luad <- c(top_up_luad, top_down_luad)
+
+# 2.EnhancedVolcano Plot:
+#png("edgeRVolcanoLUAD.png")
+EnhancedVolcano(results_edgeR_luad,
+                lab = results_edgeR_luad$SYMBOL,
+                x = 'logFC',
+                y = 'FDR',
+                FCcutoff = 1.5,
+                pCutoff = 0.05,
+                colCustom = c(
+                  "NS"   = "grey60",
+                  "NT" = "#3697AF",
+                  "TP" = "salmon")[results_edgeR_luad %>% 
+                                       dplyr::mutate(group = dplyr::case_when(
+                                         FDR <= 0.05 & logFC <= -1.5 ~ "NT",
+                                         FDR <= 0.05 & logFC >= 1.5  ~ "TP",
+                                         TRUE ~ "NS")) %>% dplyr::pull(group)], 
+                pointSize = 1,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.5,
+                legendPosition = 'bottom',
+                selectLab = top_genes_luad,
+                subtitle = "Cutoff: FDR = 0.05 | FC = 1.5")
+
+#dev.off()
+```
+
+
+
+## 6.3. EdgeR LUSC (TP vs NT):
+
+```{r}
+
+# =========================
+# EdgeR con datos LUSC:
+# =========================
+
+dge_lusc <- DGEList(counts = LUSC_mat_NT_TP, group = factor(lusc_meta_NT_TP$shortLetterCode))
+keep_lusc <- filterByExpr(dge_lusc)
+dge1_lusc <- dge_lusc[keep_lusc,,keep.lib.size=FALSE]
+
+# Normalización TMM y comprobación:
+dge_lusc <- normLibSizes(dge1_lusc,"TMM") # normalizción de datos por TMM
+
+   ## Graficación de normalización:
+plot(dge_lusc$samples$norm.factors, main="Normalization Factors")
+
+boxplot(cpm(dge_lusc, log=TRUE)[, 1:200],
+        las = 2,
+        main = "5 muestras (eje X)")
+
+# PlotMDS: Comprobar que se separen muestras
+col_er_lusc <- as.factor(dge_lusc$samples$group)
+levels(col_er_lusc) <- c("blue","red")
+col_er_lusc <- as.character(col_er_lusc)
+plotMDS(cpm(dge_lusc, log=TRUE, prior.count = 1), labels=NULL, pch=1, col=col_er_lusc)
+
+# Diseño de la matriz del modelo:
+group_lusc <- factor(dge_lusc$samples$group)
+group_lusc <- relevel(group_lusc, ref="NT")
+design_lusc <- model.matrix(~ group_lusc)
+
+# Estimar dispersion:
+dge_lusc <- estimateDisp(dge_lusc, design_lusc)
+plotBCV(dge_lusc, main="Dispersion estimates and adjustment")
+
+
+# Ajustar modelo:
+fit_lusc <- glmQLFit(dge_lusc, design_lusc)
+qlf_lusc <- glmQLFTest(fit_lusc, coef = 2) # Compara TP vs NT
+
+# Resultados
+results_edgeR_lusc <- topTags(qlf_lusc, n = Inf)$table
+results_edgeR_lusc <- results_edgeR_lusc %>% 
+  tibble::rownames_to_column("SYMBOL")
+
+
+# =========================
+# Volcano Plot LUAD (TP vs NT)
+# =========================
+set.seed(1234)
+
+# 1. Extraer top genes up y downrgulated:
+top_up_lusc <- results_edgeR_lusc %>%
+  dplyr::filter(FDR < 0.05,logFC > 1.5) %>%
+  dplyr::arrange(desc(logFC)) %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::pull(SYMBOL)
+
+top_down_lusc <- results_edgeR_lusc %>%
+  dplyr::filter(FDR < 0.05,logFC < -1.5) %>%
+  dplyr::arrange(logFC) %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::pull(SYMBOL)
+
+top_genes_lusc <- c(top_up_lusc, top_down_lusc)
+
+# 2.EnhancedVolcano Plot
+#png("edgeRVolcanoLUSC.png")
+EnhancedVolcano(results_edgeR_lusc,
+                lab = results_edgeR_lusc$SYMBOL,
+                x = 'logFC',
+                y = 'FDR',
+                FCcutoff = 1.5,
+                pCutoff = 0.05,
+                colCustom = c(
+                  "NS"   = "grey60",
+                  "NT" = "#3697AF",
+                  "TP" = "salmon")[results_edgeR_lusc %>% 
+                                       dplyr::mutate(group = dplyr::case_when(
+                                         FDR <= 0.05 & logFC <= -1.5 ~ "NT",
+                                         FDR <= 0.05 & logFC >= 1.5  ~ "TP",
+                                         TRUE ~ "NS")) %>% dplyr::pull(group)], 
+                pointSize = 1,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.5,
+                legendPosition = 'bottom',
+                selectLab = top_genes_lusc,
+                subtitle = "Cutoff: FDR = 0.05 | FC = 1.5")
+#dev.off()
+```
+
+
+## 6.4. Heatmap Genes Diferencialmente Expresados:
+
+### 6.4.1. Heatmap DEG LUSC
+```{r}
+conflicted::conflicts_prefer(
+  dplyr::filter,
+  dplyr::select,
+  dplyr::mutate,
+  dplyr::arrange
+)
+################
+# HeatMap LUSC
+################
+# 1. Extraer top 25 genes up y downregulated:
+top_LUSC_up <- results_edgeR_lusc %>%
+  filter(FDR < 0.05, logFC > 1.5) %>%
+  arrange(desc(logFC)) %>%
+  slice_head(n = 20)
+
+top_LUSC_down <- results_edgeR_lusc %>%
+  filter(FDR < 0.05, logFC < -1.5) %>%
+  arrange(logFC) %>%
+  slice_head(n = 20)
+
+selected_genes_LUSC <- rbind(top_LUSC_up, top_LUSC_down)
+
+# 2. Normalizar a logCPM los counts:
+heatmap_matrix_edge_lusc <- cpm(dge_lusc, log=TRUE, prior.count=1)[selected_genes_LUSC$SYMBOL, ]
+
+# 3. Hacer la transversa de los datos escalados transpuestos:
+heatmap_matrix_edge_lusc <- t(scale(t(heatmap_matrix_edge_lusc)))
+
+
+# 4. Graficación:
+library(ComplexHeatmap)
+set.seed(1234)
+
+    ## Establecer colores
+ha_lusc <- HeatmapAnnotation(
+  cancer_type = lusc_meta_NT_TP$shortLetterCode, col = list(cancer_type = c("TP" = "red", "NT" = "blue")))
+
+
+    ##Heatmap
+Heatmap(heatmap_matrix_edge_lusc,
+        name = "Z-Score",
+        show_column_names = FALSE,
+        border = TRUE,
+        row_names_gp = gpar(fontsize = 7),
+        top_annotation = ha_lusc)
+
+```
+
+
+### 6.4.1. Heatmap DEG LUAD
+```{r}
+################
+# HeatMap LUAD
+################
+# 1. Extraer top 25 genes up y downregulated:
+top_LUAD_up <- results_edgeR_luad %>%
+  filter(FDR < 0.05,logFC > 1.5) %>%
+  arrange(desc(logFC)) %>%
+  slice_head(n=20)
+
+top_LUAD_down <- results_edgeR_luad %>%
+  filter(FDR < 0.05, logFC < -1.5) %>%
+  arrange(logFC) %>%
+  slice_head(n=20)
+
+selected_genes_LUAD <- rbind(top_LUAD_up, top_LUAD_down)
+
+# 2. Normalizar a logCPM los counts:
+heatmap_matrix_edge_luad <- cpm(dge_luad, log=TRUE, prior.count=1)[selected_genes_LUAD$SYMBOL, ]
+
+# 3. Hacer la transversa de los datos escalados transpuestos:
+heatmap_matrix_edge_luad <- t(scale(t(heatmap_matrix_edge_luad)))
+
+# 4. Graficación:
+set.seed(1234)
+
+    ## Establecer colores
+ha_luad <- HeatmapAnnotation(
+  samples = luad_meta_NT_TP$shortLetterCode, col = list(samples = c("TP" = "red", "NT" = "blue")))
+
+    ##Heatmap
+Heatmap(heatmap_matrix_edge_luad,
+        name = "Z-Score",
+        show_column_names = FALSE,
+        border = TRUE,
+        row_names_gp = gpar(fontsize = 7),
+        top_annotation = ha_luad)
+
+```
+
+
+# 7. Deseq2 (Comprobación rigurosidad):
+
+Se ha optado por la doble validación con el algoritmo Deseq2 para validar los genes up y downregulated obtenidos en cada caso con EdgeR.
+
+## 7.1. Deseq2 LUAD:
+```{r}
+###############
+# Deseq2 LUAD:
+###############
+dds1_luad <- DESeqDataSetFromMatrix(
+  countData = dge1_luad$counts,
+  colData = luad_meta_NT_TP,
+  design = ~ shortLetterCode
+)
+
+dds_luad <- DESeq(dds1_luad, betaPrior = FALSE)
+res_luad <- results(dds_luad, contrast = c("shortLetterCode", "TP", "NT"))
+res_shrunk_luad <- lfcShrink(dds_luad,
+  coef = "shortLetterCode_TP_vs_NT" ,
+  type = "apeglm"
+)
+results_deseq_luad <- as.data.frame(res_shrunk_luad) %>%
+  tibble::rownames_to_column("SYMBOL")%>%
+  na.omit()
+
+##############
+# VolcanoPlot LUAD
+#############
+library(EnhancedVolcano)
+set.seed(1234)
+
+
+EnhancedVolcano(results_deseq_luad,
+                lab = results_deseq_luad$SYMBOL,
+                x = 'log2FoldChange',
+                y = 'padj',
+                FCcutoff = 1.5,
+                pCutoff = 0.05,
+                colCustom = c(
+                  "NS"   = "grey60",
+                  "NT" = "#3697AF",
+                  "TP" = "salmon")[results_deseq_luad %>% 
+                                       dplyr::mutate(group = dplyr::case_when(
+                                         padj <= 0.05 & log2FoldChange <= -1.5 ~ "NT",
+                                         padj <= 0.05 & log2FoldChange >= 1.5  ~ "TP",
+                                         TRUE ~ "NS")) %>% dplyr::pull(group)], 
+                pointSize = 1,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.5,
+                legendPosition = 'bottom',
+                subtitle = "Cutoff: FDR = 0.05 | FC = 1.5")
+
+
+###################
+# Heatmap DEG LUAD:
+###################
+# 1. Extraer top 25 up y downregulated genes:
+top_LUAD_down<- results_deseq_luad %>%
+  filter(log2FoldChange < -1.5, padj < 0.05) %>%
+  arrange(log2FoldChange) %>%
+  head(20)
+top_LUAD_up<- results_deseq_luad %>%
+  filter(log2FoldChange > 1.5, padj < 0.05) %>%
+  arrange(desc(log2FoldChange)) %>%
+  head(20)
+selected_genes_des <- rbind(top_LUAD_down, top_LUAD_up)
+top_40_genes_des <- selected_genes_des$SYMBOL
+
+# 2. Normalizar VST:
+vsd_des <- vst(dds1_luad, blind = TRUE)
+vsd_des <- assay(vsd_des)
+
+# 3. Filtrar los genes up y down
+heatmap_matrix_des <- vsd_des[top_40_genes_des, ]
+
+# 4. Transpuesta de los datos escalados:
+heatmap_matrix_des <- t(scale(t(heatmap_matrix_des)))
+
+# 5. Graficación:
+library(ComplexHeatmap)
+set.seed(1234)
+
+  ## Establecer colores:
+ha <- HeatmapAnnotation(
+  sample = luad_meta_NT_TP$shortLetterCode, col = list(sample = c("TP" = "red", "NT" = "blue"))
+)
+
+  ## Heatmap:
+Heatmap(heatmap_matrix_des,
+        name = "Z-Score",
+        show_column_names = FALSE,
+        border = TRUE,
+        row_names_gp = gpar(fontsize = 7),
+        top_annotation = ha)
+
+
+
+
+```
+
+## 7.2. Deseq2 LUSC
+```{r}
+
+###################
+# DESeq2 LUSC
+##################
+dds1_lusc <- DESeqDataSetFromMatrix(
+  countData = dge1_lusc$counts,
+  colData = lusc_meta_NT_TP,
+  design = ~ shortLetterCode
+)
+
+dds_lusc <- DESeq(dds1_lusc, betaPrior = FALSE)
+
+res_lusc <- results(dds_lusc, contrast = c("shortLetterCode", "TP", "NT"))
+res_shrunk_lusc <- lfcShrink(dds_lusc,
+  coef = "shortLetterCode_TP_vs_NT" ,
+  type = "apeglm"
+)
+results_deseq_lusc <- as.data.frame(res_shrunk_lusc) %>%
+  tibble::rownames_to_column("SYMBOL")%>%
+  na.omit()
+
+##################
+# VolcanoPlot LUSC
+###################
+library(EnhancedVolcano)
+set.seed(1234)
+
+
+EnhancedVolcano(results_deseq_lusc,
+                lab = results_deseq_lusc$SYMBOL,
+                x = 'log2FoldChange',
+                y = 'padj',
+                FCcutoff = 1.5,
+                pCutoff = 0.05,
+                colCustom = c(
+                  "NS"   = "grey60",
+                  "NT" = "#3697AF",
+                  "TP" = "salmon")[results_deseq_lusc %>% 
+                                       dplyr::mutate(group = dplyr::case_when(
+                                         padj <= 0.05 & log2FoldChange <= -1.5 ~ "NT",
+                                         padj <= 0.05 & log2FoldChange >= 1.5  ~ "TP",
+                                         TRUE ~ "NS")) %>% dplyr::pull(group)], 
+                pointSize = 1,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.5,
+                legendPosition = 'bottom',
+                subtitle = "Cutoff: FDR = 0.05 | FC = 1.5")
+
+
+###################
+# HeatMap DEG LUSC
+###################
+# 1. Extraer top 25 up y downregulated genes:
+top_LUSC_down<- results_deseq_lusc %>%
+  filter(log2FoldChange < -1.5, padj < 0.05) %>%
+  arrange(log2FoldChange) %>%
+  head(20)
+top_LUSC_up<- results_deseq_lusc %>%
+  filter(log2FoldChange > 1.5, padj < 0.05) %>%
+  arrange(desc(log2FoldChange)) %>%
+  head(20)
+
+selected_genes_des_lusc <- rbind(top_LUSC_up, top_LUSC_down)
+top_40_genes_des_LUSC <- selected_genes_des_lusc$SYMBOL
+
+# 2. Normalizar VST:
+vsd_des_lusc <- vst(dds1_lusc, blind = TRUE)
+vsd_des_lusc <- assay(vsd_des_lusc)
+
+# 3. Filtrar los genes up y down
+heatmap_matrix_des_lusc <- vsd_des_lusc[top_40_genes_des_LUSC, ]
+
+# 4. Transpuesta de los datos escalados:
+heatmap_matrix_des_lusc <- t(scale(t(heatmap_matrix_des_lusc)))
+
+# 5. Graficación:
+library(ComplexHeatmap)
+set.seed(1234)
+
+  ## Establecer colores:
+ha_lusc <- HeatmapAnnotation(
+  sample = lusc_meta_NT_TP$shortLetterCode, col = list(sample = c("TP" = "red", "NT" = "blue"))
+)
+
+  ## Heatmap:
+Heatmap(heatmap_matrix_des_lusc,
+        name = "Z-Score",
+        show_column_names = FALSE,
+        border = TRUE,
+        row_names_gp = gpar(fontsize = 7),
+        top_annotation = ha_lusc)
+```
+
+## 7.3. VennDiaram de los genes predichos por EdgeR y Deseq2:
+```{r}
+# Instala y carga las librerías necesarias si no las tienes
+# install.packages(c("ggVennDiagram", "ggplot2", "gridExtra", "RColorBrewer"))
+library(ggVennDiagram)
+library(ggplot2)
+library(gridExtra)
+library(RColorBrewer)
+
+# =========================================================
+# 1. GENES UP/DOWN REGULATED
+# =========================================================
+
+# -------------------------
+# LUAD
+# -------------------------
+
+# edgeR
+er_up_LUAD <- results_edgeR_luad %>%
+  filter(FDR <= 0.05, logFC >= 1.5) %>%
+  pull(SYMBOL)
+
+er_down_LUAD <- results_edgeR_luad %>%
+  filter(FDR <= 0.05, logFC <= -1.5) %>%
+  pull(SYMBOL)
+
+# DESeq2
+ds_up_LUAD <- results_deseq_luad %>%
+  filter(padj <= 0.05, log2FoldChange >= 1.5) %>%
+  pull(SYMBOL)
+
+ds_down_LUAD <- results_deseq_luad %>%
+  filter(padj <= 0.05, log2FoldChange <= -1.5) %>%
+  pull(SYMBOL)
+
+# -------------------------
+# LUSC
+# -------------------------
+
+# edgeR
+er_up_LUSC <- results_edgeR_lusc %>%
+  filter(FDR <= 0.05, logFC >= 1.5) %>%
+  pull(SYMBOL)
+
+er_down_LUSC <- results_edgeR_lusc %>%
+  filter(FDR <= 0.05, logFC <= -1.5) %>%
+  pull(SYMBOL)
+
+# DESeq2
+ds_up_LUSC <- results_deseq_lusc %>%
+  filter(padj <= 0.05, log2FoldChange >= 1.5) %>%
+  pull(SYMBOL)
+
+ds_down_LUSC <- results_deseq_lusc %>%
+  filter(padj <= 0.05, log2FoldChange <= -1.5) %>%
+  pull(SYMBOL)
+
+# =========================================================
+# 2. LISTAS PARA VENN
+# =========================================================
+
+# UP genes
+lista_lusc_up <- list(
+  edgeR = er_up_LUSC,
+  DESeq2 = ds_up_LUSC
+)
+
+lista_luad_up <- list(
+  edgeR = er_up_LUAD,
+  DESeq2 = ds_up_LUAD
+)
+
+# DOWN genes
+lista_lusc_down <- list(
+  edgeR = er_down_LUSC,
+  DESeq2 = ds_down_LUSC
+)
+
+lista_luad_down <- list(
+  edgeR = er_down_LUAD,
+  DESeq2 = ds_down_LUAD
+)
+
+# =========================================================
+# 3. PALETAS DE COLORES
+# =========================================================
+
+colores_lusc <- brewer.pal(3, "Set1")[1:2]
+colores_luad <- brewer.pal(3, "Set2")[1:2]
+
+# =========================================================
+# 4. VENN LUSC UP
+# =========================================================
+
+p1 <- ggVennDiagram(
+  lista_lusc_up,
+  label = "count",
+  label_alpha = 0,
+  label_size = 6,
+  category.names = c("edgeR", "DESeq2"),
+  set_size = 5
+) +
+  scale_fill_gradient(
+    low = "white",
+    high = colores_lusc[1]
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 16,
+      face = "bold"
+    )
+  ) +
+  labs(title = "LUSC UP-regulated")
+
+# =========================================================
+# 5. VENN LUAD UP
+# =========================================================
+
+p2 <- ggVennDiagram(
+  lista_luad_up,
+  label = "count",
+  label_alpha = 0,
+  label_size = 6,
+  category.names = c("edgeR", "DESeq2"),
+  set_size = 5
+) +
+  scale_fill_gradient(
+    low = "white",
+    high = colores_luad[1]
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 16,
+      face = "bold"
+    )
+  ) +
+  labs(title = "LUAD UP-regulated")
+
+# =========================================================
+# 6. VENN LUSC DOWN
+# =========================================================
+
+p3 <- ggVennDiagram(
+  lista_lusc_down,
+  label = "count",
+  label_alpha = 0,
+  label_size = 6,
+  category.names = c("edgeR", "DESeq2"),
+  set_size = 5
+) +
+  scale_fill_gradient(
+    low = "white",
+    high = colores_lusc[2]
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 16,
+      face = "bold"
+    )
+  ) +
+  labs(title = "LUSC DOWN-regulated")
+
+# =========================================================
+# 7. VENN LUAD DOWN
+# =========================================================
+
+p4 <- ggVennDiagram(
+  lista_luad_down,
+  label = "count",
+  label_alpha = 0,
+  label_size = 6,
+  category.names = c("edgeR", "DESeq2"),
+  set_size = 5
+) +
+  scale_fill_gradient(
+    low = "white",
+    high = colores_luad[2]
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(
+      hjust = 0.5,
+      size = 16,
+      face = "bold"
+    )
+  ) +
+  labs(title = "LUAD DOWN-regulated")
+
+# =========================================================
+# 8. PANEL FINAL
+# =========================================================
+
+grid.arrange(
+  p1, p2,
+  p3, p4,
+  ncol = 2
+)
+
+
+```
+
+# 8. GSEA
+## 8.1. GSEA LUAD (KEGG, Hallmark, Reactome):
+```{r}
+library(msigdbr)
+library(clusterProfiler)
+library(dplyr)
+library(ggplot2)
+library(conflicted)
+
+# evitar conflictos de funciones
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("mutate", "dplyr")
+conflict_prefer("arrange", "dplyr")
+
+#################################################
+# 1. GENE LIST (SYMBOL)
+#################################################
+
+df_edgeR_luad <- results_edgeR_luad
+
+# ranking directo en SYMBOL
+gene_list_luad <- df_edgeR_luad$logFC
+names(gene_list_luad) <- df_edgeR_luad$SYMBOL
+
+# limpieza
+gene_list_luad <- na.omit(gene_list_luad)
+
+# ordenar (clave para GSEA)
+gene_list_luad <- sort(gene_list_luad, decreasing = TRUE)
+
+#################################################
+# 2. KEGG GSEA (SYMBOL)
+#################################################
+
+m_kegg_symbol <- msigdbr(
+  species = "Homo sapiens",
+  category = "C2",
+  subcategory = "CP:KEGG_LEGACY"
+) %>%
+  dplyr::select(gs_name, gene_symbol)
+
+gsea_kegg_luad <- GSEA(
+  geneList = gene_list_luad,
+  TERM2GENE = m_kegg_symbol,
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  seed = 1234,
+  verbose = FALSE,
+  pAdjustMethod = "BH"
+)
+
+df_kegg <- as.data.frame(gsea_kegg_luad) %>%
+  mutate(Direction = ifelse(NES > 0, "Activated", "Suppressed")) %>%
+  arrange(p.adjust)
+
+top30_kegg <- df_kegg %>%
+  slice_head(n = 15)
+
+ggplot(top30_kegg,
+       aes(x = NES,
+           y = reorder(Description, NES),
+           size = setSize,
+           color = p.adjust)) +
+  geom_point() +
+  facet_grid(. ~ Direction, scales = "free_y") +
+  scale_color_gradient(low = "red", high = "green") +
+  theme_bw() +
+  labs(title = "KEGG GSEA (TCGA-LUAD)",
+       x = "NES",
+       y = "Pathway",
+       size = "Gene set size",
+       color = "FDR") +
+  theme(axis.text.y = element_text(size = 7))
+
+#################################################
+# 3. HALLMARK GSEA (SYMBOL)
+#################################################
+
+m_hall_symbol <- msigdbr(
+  species = "Homo sapiens",
+  category = "H"
+) %>%
+  dplyr::select(gs_name, gene_symbol)
+
+gsea_hall_luad <- GSEA(
+  geneList = gene_list_luad,
+  TERM2GENE = m_hall_symbol,
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  seed = 1234,
+  verbose = FALSE,
+  pAdjustMethod = "BH"
+)
+
+df_hall <- as.data.frame(gsea_hall_luad) %>%
+  mutate(Direction = ifelse(NES > 0, "Activated", "Suppressed")) %>%
+  arrange(p.adjust)
+
+top30_hall <- df_hall %>%
+  slice_head(n = 15)
+
+ggplot(top30_hall,
+       aes(x = NES,
+           y = reorder(Description, NES),
+           size = setSize,
+           color = p.adjust)) +
+  geom_point() +
+  facet_grid(. ~ Direction, scales = "free_y") +
+  scale_color_gradient(low = "red", high = "green") +
+  theme_bw() +
+  labs(title = "HALLMARK GSEA (TCGA-LUAD)",
+       x = "NES",
+       y = "Hallmark",
+       size = "Gene set size",
+       color = "FDR") +
+  theme(axis.text.y = element_text(size = 7))
+
+#################################################
+# 4. REACTOME GSEA (SYMBOL)
+#################################################
+
+m_reactome_symbol <- msigdbr(
+  species = "Homo sapiens",
+  category = "C2",
+  subcategory = "CP:REACTOME"
+) %>%
+  dplyr::select(gs_name, gene_symbol)
+
+gsea_reactome_luad <- GSEA(
+  geneList = gene_list_luad,
+  TERM2GENE = m_reactome_symbol,
+  pvalueCutoff = 0.05,
+  seed = 2022,
+  minGSSize = 10,
+  maxGSSize = 800,
+  verbose = FALSE,
+   pAdjustMethod = "BH"
+)
+
+df_reactome <- as.data.frame(gsea_reactome_luad) %>%
+  mutate(Direction = ifelse(NES > 0, "Activated", "Suppressed")) %>%
+  arrange(p.adjust)
+
+top30_reactome <- df_reactome %>%
+  slice_head(n = 15) %>%
+  mutate(
+    Description = as.character(Description),
+    Description = gsub("(.{35})", "\\1\n", Description)
+  )
+
+ggplot(top30_reactome,
+       aes(x = NES,
+           y = Description,
+           size = setSize,
+           color = p.adjust)) +
+  geom_point() +
+  facet_grid(. ~ Direction) +
+  scale_color_gradient(low = "green", high = "red") +
+  theme_bw() +
+  labs(title = "REACTOME GSEA (TCGA-LUAD)",
+       x = "NES",
+       y = "Pathway",
+       size = "Gene set size",
+       color = "FDR") +
+  theme(axis.text.y = element_text(size = 6),
+        plot.margin = margin(5, 10, 5, 50))
+
+
+```
+
+
+
+## 8.2.  GSEA LUSC (KEGG, Hallmark, Reactome):
+
+```{r}
+library(msigdbr)
+library(clusterProfiler)
+library(dplyr)
+library(ggplot2)
+library(conflicted)
+
+# evitar conflictos
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("mutate", "dplyr")
+conflict_prefer("arrange", "dplyr")
+
+#################################################
+# 1. GENE LIST (SYMBOL - CONSISTENTE)
+#################################################
+
+df_edgeR_lusc <- results_edgeR_lusc
+
+# Ranking directo en SYMBOL
+gene_list_lusc <- df_edgeR_lusc$logFC
+names(gene_list_lusc) <- df_edgeR_lusc$SYMBOL
+
+# limpiar NA (solo por seguridad)
+gene_list_lusc <- na.omit(gene_list_lusc)
+
+# ordenar
+gene_list_lusc <- sort(gene_list_lusc, decreasing = TRUE)
+
+#################################################
+# 2. KEGG GSEA (SYMBOL)
+#################################################
+
+m_kegg_symbol <- msigdbr(
+  species = "Homo sapiens",
+  category = "C2",
+  subcategory = "CP:KEGG_LEGACY"
+) %>%
+  dplyr::select(gs_name, gene_symbol)
+
+gsea_kegg_lusc <- GSEA(
+  geneList = gene_list_lusc,
+  TERM2GENE = m_kegg_symbol,
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  seed = 1234,
+  verbose = FALSE,
+  pAdjustMethod = "BH"
+)
+
+df_kegg <- as.data.frame(gsea_kegg_lusc) %>%
+  mutate(Direction = ifelse(NES > 0, "Activated", "Suppressed")) %>%
+  arrange(p.adjust)
+
+top30_kegg <- df_kegg %>%
+  slice_head(n = 15)
+
+ggplot(top30_kegg,
+       aes(x = NES,
+           y = reorder(Description, NES),
+           size = setSize,
+           color = p.adjust)) +
+  geom_point() +
+  facet_grid(. ~ Direction, scales = "free_y") +
+  scale_color_gradient(low = "red", high = "green") +
+  theme_bw() +
+  labs(title = "KEGG GSEA (TCGA-LUSC)",
+       x = "NES",
+       y = "Pathway",
+       size = "Gene set size",
+       color = "FDR") +
+  theme(axis.text.y = element_text(size = 7))
+
+#################################################
+# 3. HALLMARK (SYMBOL)
+#################################################
+
+m_hall_symbol <- msigdbr(
+  species = "Homo sapiens",
+  category = "H"
+) %>%
+  dplyr::select(gs_name, gene_symbol)
+
+gsea_hall_lusc <- GSEA(
+  geneList = gene_list_lusc,
+  TERM2GENE = m_hall_symbol,
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  seed = 1234,
+  verbose = FALSE,
+  pAdjustMethod = "BH"
+)
+
+df_hall <- as.data.frame(gsea_hall_lusc) %>%
+  mutate(Direction = ifelse(NES > 0, "Activated", "Suppressed")) %>%
+  arrange(p.adjust)
+
+top30_hall <- df_hall %>%
+  slice_head(n = 15)
+
+ggplot(top30_hall,
+       aes(x = NES,
+           y = reorder(Description, NES),
+           size = setSize,
+           color = p.adjust)) +
+  geom_point() +
+  facet_grid(. ~ Direction, scales = "free_y") +
+  scale_color_gradient(low = "red", high = "green") +
+  theme_bw() +
+  labs(title = "HALLMARK GSEA (TCGA-LUSC)",
+       x = "NES",
+       y = "Hallmark",
+       size = "Gene set size",
+       color = "FDR") +
+  theme(axis.text.y = element_text(size = 7))
+
+#################################################
+# 4. REACTOME (SYMBOL)
+#################################################
+
+m_reactome_symbol <- msigdbr(
+  species = "Homo sapiens",
+  category = "C2",
+  subcategory = "CP:REACTOME"
+) %>%
+  dplyr::select(gs_name, gene_symbol)
+
+gsea_reactome_lusc <- GSEA(
+  geneList = gene_list_lusc,
+  TERM2GENE = m_reactome_symbol,
+  pvalueCutoff = 0.05,
+  seed = 2022,
+  minGSSize = 10,
+  maxGSSize = 800,
+  verbose = FALSE,
+  pAdjustMethod = "BH"
+)
+
+df_reactome <- as.data.frame(gsea_reactome_lusc) %>%
+  mutate(Direction = ifelse(NES > 0, "Activated", "Suppressed")) %>%
+  arrange(p.adjust)
+
+top30_reactome <- df_reactome %>%
+  slice_head(n = 15) %>%
+  mutate(
+    Description = as.character(Description),
+    Description = gsub("(.{35})", "\\1\n", Description)
+  )
+
+ggplot(top30_reactome,
+       aes(x = NES,
+           y = Description,
+           size = setSize,
+           color = p.adjust)) +
+  geom_point() +
+  facet_grid(. ~ Direction) +
+  scale_color_gradient(low = "green", high = "red") +
+  theme_bw() +
+  labs(title = "REACTOME GSEA (TCGA-LUSC)",
+       x = "NES",
+       y = "Pathway",
+       size = "Gene set size",
+       color = "FDR") +
+  theme(axis.text.y = element_text(size = 6),
+        plot.margin = margin(5, 10, 5, 50))
+
+
+
+
+```
+
+### 8.2.1.GO BP, CC, M LUSC
+
+```{r}
+## GO:
+
+####### BP:
+gse_GO_bp_lusc <- gseGO(geneList = gene_list_lusc,
+                ont = "BP",
+                OrgDb = org.Hs.eg.db,
+                minGSSize = 10,
+                maxGSSize = 500,
+                keyType = "SYMBOL",
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH")
+
+
+dotplot(gse_GO_bp_lusc, split = ".sign",font.size= 6) +
+  facet_grid(. ~ .sign)
+
+###### CCs:
+gse_GO_cc_lusc <- gseGO(geneList = gene_list_lusc,
+                ont = "CC",
+                OrgDb = org.Hs.eg.db,
+                minGSSize = 10,
+                maxGSSize = 500,
+                keyType = "SYMBOL",
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH")
+
+dotplot(gse_GO_cc_lusc, split = ".sign",font.size= 6) +
+  facet_grid(. ~ .sign)
+
+##### MFs:
+gse_GO_mf_lusc <- gseGO(geneList = gene_list_lusc,
+                ont = "MF",
+                OrgDb = org.Hs.eg.db,
+                minGSSize = 10,
+                maxGSSize = 500,
+                keyType = "SYMBOL",
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH")
+
+dotplot(gse_GO_mf_lusc, split = ".sign",font.size= 6) +
+  facet_grid(. ~ .sign)
+```
+
+# 9. DEG estratificado MUT vs WT:
+
+## 9.1. Preparación datos:
+
+Importamos los datos de los barcodes muestrales con sus columnas categóricas (status) para cada gen, si este está o no mutado (MUT, WT). Dado que este último documento contiene el estado del gen, mutado o no, se utilizará como metadata, y la matriz de expresión filtrada por las muestras biológicas comunes, como matriz de conteos.
+
+```{r}
+# Cargams los datos de genes driver detectados con muestras mutadas y wt:
+
+################
+# Genes LUAD
+################
+
+luad_mut_wt_matrix <- read.csv("/Users/noegragerajimenez/Documents/TFM/Analysis RStudio/Scripts/Análisis mutacional/plots_mut_analisis/LUAD_mut_wt_matrix.csv", stringsAsFactors = FALSE)
+luad_mut_wt <- as.data.frame(luad_mut_wt_matrix)
+
+
+################
+# Genes LUSC
+################
+
+lusc_mut_wt_matrix <- read.csv("/Users/noegragerajimenez/Documents/TFM/Analysis RStudio/Scripts/Análisis mutacional/plots_mut_analisis/LUSC_mut_wt_matrix.csv", stringsAsFactors = FALSE)
+lusc_mut_wt <- as.data.frame(lusc_mut_wt_matrix)
+```
+
+## 9.2. Función general EdgeR:
+
+Primero de todo, para facilitar y agilizar el proceso de análisi de genes diferencialmente expresados, se ha utilizado el pipeline de EdgeR, para crear una función que establezca el codigo para realizar DEGs con EdgeR, y como output de los resultados estadísticos para cada gen. Al ser una función al que se le debe de aplicar el status del gen en concreto (columna del gen en metadata), permite que este codigo aplique los grupos en función de cada gen a estudiar, y sea reproducible.
+
+```{r}
+#Función edgeR
+run_edger_deg <- function(expr_mat, meta, status_col) {
+
+  # 1. grupo
+  group <- factor(meta[[status_col]])
+
+  # 2. diseño
+
+  # 3. DGE object
+  dge <- DGEList(counts = expr_mat, group=group)
+
+  # 4. filtrado expresión baja
+  keep <- filterByExpr(dge)
+  dge <- dge[keep, , keep.lib.sizes = FALSE]
+
+  # 5. normalización
+  dge <- normLibSizes(dge,"TMM")
+
+  # 6. dispersión
+  group <- relevel(group, ref="WT")
+  design <- model.matrix(~group)
+  dge <- estimateDisp(dge, design)
+
+  # 7. modelo
+  fit <- glmQLFit(dge, design)
+
+  # 8. contraste MUT vs WT
+  qlf <- glmQLFTest(fit, coef = 2)
+
+  # 9. resultados
+  res <- topTags(qlf, n = Inf)$table
+  res <- res %>% 
+  tibble::rownames_to_column("SYMBOL")
+
+  return(res)
+  
+}
+
+```
+
+## 9.3. DEG estratificado drivers LUAD:
+
+### 9.3.1. Unificar muestras mutadas y wt, con las del estudio de expresión:
+
+Dado que el Tumor_Sample_Barcode no coincide por proceder de diferentes métodos, estos se han normalizado a los 16 primeros digitos,para garantizar el apareamiento. Este barcode reducido corresponde al identificador de la muestra biológica.
+
+```{r}
+library(edgeR)
+conflicted::conflicts_prefer(base::intersect)
+# 1. Extraer 16 digitos de samples en cada data:
+luad_mut_wt$barcode_short <- substr(luad_mut_wt$Tumor_Sample_Barcode, 1, 16)
+
+colnames(LUAD_mat) <- substr(colnames(LUAD_mat), 1, 16)
+
+# 2.Ver que muestras coiciden de cada data:
+common_samples <- intersect(colnames(LUAD_mat), luad_mut_wt$barcode_short)
+
+# Filtrar cada data:
+LUAD_mat_driv <- LUAD_mat[,common_samples, drop=FALSE]
+
+luad_meta_driv <- luad_mut_wt[luad_mut_wt$barcode_short %in% common_samples, ]
+luad_meta_driv <- luad_meta_driv[match(common_samples, luad_meta_driv$barcode_short), ]
+LUAD_mat_driv <- LUAD_mat_driv[, luad_meta_driv$barcode_short]
+
+```
+
+
+### 9.3.2. EdgeR genes driver (mut vs wt) y GSEA Hallmarc LUAD:
+
+Se ha realizado el EdgeR sobre la matriz de expresión de muestras TP, para ver el efecto de mut y wt en el tumor.
+
+```{r}
+library(clusterProfiler)
+################
+# KRAS
+################
+set.seed(1234)
+res_KRAS <- run_edger_deg(
+  expr_mat = LUAD_mat_driv,
+  meta = luad_meta_driv,
+  status_col = "KRAS_status"
+)
+
+gene_list_KRAS <- res_KRAS$logFC
+names(gene_list_KRAS) <- res_KRAS$SYMBOL
+gene_list_KRAS<- sort(gene_list_KRAS, decreasing = TRUE)
+
+msig_res_hall_KRAS <- GSEA(geneList = gene_list_KRAS, 
+                 TERM2GENE = m_hall_symbol,
+                 pvalueCutoff = 0.05, 
+                 minGSSize = 10,
+                 maxGSSize = 500,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+
+
+dotplot(msig_res_hall_KRAS, split = ".sign", title="KRAS LUAD GSEA") +
+  facet_grid(. ~ .sign)
+
+################
+# STK11
+################
+set.seed(1234)
+
+res_STK11 <- run_edger_deg(
+  expr_mat = LUAD_mat_driv,
+  meta = luad_meta_driv,
+  status_col = "STK11_status"
+)
+
+
+gene_list_STK11 <- res_STK11$logFC
+names(gene_list_STK11) <- res_STK11$SYMBOL
+gene_list_STK11<- sort(gene_list_STK11, decreasing = TRUE)
+
+msig_res_hall_STK11 <- GSEA(geneList = gene_list_STK11, 
+                 TERM2GENE = m_hall_symbol,
+                 pvalueCutoff = 0.05, 
+                 minGSSize = 10,
+                 maxGSSize = 800,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+
+dotplot(msig_res_hall_STK11, showCategory = 10, split = ".sign",title="STK11 LUAD GSEA") +
+  facet_grid(. ~ .sign)
+
+
+################
+# EGFR
+################
+set.seed(1234)
+res_EGFR <- run_edger_deg(
+  expr_mat = LUAD_mat_driv,
+  meta = luad_meta_driv,
+  status_col = "EGFR_status"
+)
+
+gene_list_EGFR <- res_EGFR$logFC
+names(gene_list_EGFR) <- res_EGFR$SYMBOL
+gene_list_EGFR<- sort(gene_list_EGFR, decreasing = TRUE)
+
+msig_res_hall_EGFR <- GSEA(geneList = gene_list_EGFR, 
+                 TERM2GENE = m_hall_symbol,
+                 pvalueCutoff = 0.05, 
+                 minGSSize = 10,
+                 maxGSSize = 500,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+
+
+dotplot(msig_res_hall_EGFR, split = ".sign",title="EGFR LUAD GSEA") +
+  facet_grid(. ~ .sign)
+
+
+################
+# KEAP1
+################
+set.seed(1234)
+res_KEAP1 <- run_edger_deg(
+  expr_mat = LUAD_mat_driv,
+  meta = luad_meta_driv,
+  status_col = "KEAP1_status"
+)
+
+gene_list_KEAP1 <- res_KEAP1$logFC
+names(gene_list_KEAP1) <- res_KEAP1$SYMBOL
+gene_list_KEAP1<- sort(gene_list_KEAP1, decreasing = TRUE)
+
+msig_res_hall_KEAP1 <- GSEA(geneList = gene_list_KEAP1, 
+                 TERM2GENE = m_hall_symbol,
+                 pvalueCutoff = 0.05, 
+                 minGSSize = 10,
+                 maxGSSize = 500,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+
+
+dotplot(msig_res_hall_KEAP1, split = ".sign",title="KEAP1 LUAD GSEA") +
+  facet_grid(. ~ .sign)
+
+################
+# BRAF
+################
+set.seed(1234)
+res_BRAF <- run_edger_deg(
+  expr_mat = LUAD_mat_driv,
+  meta = luad_meta_driv,
+  status_col = "BRAF_status"
+)
+
+gene_list_BRAF <- res_BRAF$logFC
+names(gene_list_BRAF) <- res_BRAF$SYMBOL
+gene_list_BRAF<- sort(gene_list_BRAF, decreasing = TRUE)
+
+msig_res_hall_BRAF <- GSEA(geneList = gene_list_BRAF, 
+                 TERM2GENE = m_hall_symbol,
+                 pvalueCutoff = 0.05, 
+                 minGSSize = 10,
+                 maxGSSize = 500,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+
+
+dotplot(msig_res_hall_BRAF, split = ".sign",title="BRAF LUAD GSEA") +
+  facet_grid(. ~ .sign)
+
+################
+# SMARCA4
+################
+set.seed(1234)
+res_SMARCA4 <- run_edger_deg(
+  expr_mat = LUAD_mat_driv,
+  meta = luad_meta_driv,
+  status_col = "SMARCA4_status"
+)
+
+gene_list_SMARCA4 <- res_SMARCA4$logFC
+names(gene_list_SMARCA4) <- res_SMARCA4$SYMBOL
+gene_list_SMARCA4<- sort(gene_list_SMARCA4, decreasing = TRUE)
+
+msig_res_hall_SMARCA4 <- GSEA(geneList = gene_list_SMARCA4, 
+                 TERM2GENE = m_hall_symbol,
+                 pvalueCutoff = 0.05, 
+                 minGSSize = 10,
+                 maxGSSize = 500,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+
+
+dotplot(msig_res_hall_SMARCA4, split = ".sign",title="SMARCA4 LUAD GSEA") +
+  facet_grid(. ~ .sign)
+
+################
+# MGA
+################
+set.seed(1234)
+res_MGA <- run_edger_deg(
+  expr_mat = LUAD_mat_driv,
+  meta = luad_meta_driv,
+  status_col = "MGA_status"
+)
+
+gene_list_MGA <- res_MGA$logFC
+names(gene_list_MGA) <- res_MGA$SYMBOL
+gene_list_MGA<- sort(gene_list_MGA, decreasing = TRUE)
+
+
+msig_res_hall_MGA <- GSEA(geneList = gene_list_MGA, 
+                 TERM2GENE = m_hall_symbol,
+                 pvalueCutoff = 0.05, 
+                 minGSSize = 10,
+                 maxGSSize = 500,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+
+
+dotplot(msig_res_hall_MGA, split = ".sign",title="MGA LUAD GSEA") +
+  facet_grid(. ~ .sign)
+
+
+```
+
+
+
+### 9.3.3. EdgeR genes driver (mut vs wt) y GSEA Hallmarc LUSC:
+
+Del estudio ha quedado a fuera el gen NFE2L2, por ausencia de pathways enriquecidas. Se ha seguido el fljo de trabajo que se ha descrito anteriormente con LUAD, tanto la preparacón de las muestras como el uso de EdgeR y Hallmarc, la unica distinción es que se han usado genes drivers especificos de LUSC.
+
+```{r}
+#########################################################
+# PREPARACIÓN DATOS LUSC
+#########################################################
+
+lusc_mut_wt$barcode_short <- substr(lusc_mut_wt$Tumor_Sample_Barcode, 1, 16)
+colnames(LUSC_mat) <- substr(colnames(LUSC_mat), 1, 16)
+
+common_samples <- intersect(colnames(LUSC_mat), lusc_mut_wt$barcode_short)
+
+length(common_samples)
+
+LUSC_mat_driv <- LUSC_mat[, common_samples, drop = FALSE]
+
+lusc_meta_driv <- lusc_mut_wt[
+  lusc_mut_wt$barcode_short %in% common_samples,
+]
+
+lusc_meta_driv <- lusc_meta_driv[
+  match(common_samples, lusc_meta_driv$barcode_short),
+]
+
+LUSC_mat_driv <- LUSC_mat_driv[, lusc_meta_driv$barcode_short]
+
+table(lusc_meta_driv$TP53_status)
+table(lusc_meta_driv$NFE2L2_status)
+table(lusc_meta_driv$KMT2D_status)
+table(lusc_meta_driv$PTEN_status)
+table(lusc_meta_driv$CDKN2A_status)
+table(lusc_meta_driv$PIK3CA_status)
+
+#########################################################
+# TP53
+#########################################################
+
+set.seed(1234)
+
+res_TP53 <- run_edger_deg(
+  expr_mat = LUSC_mat_driv,
+  meta = lusc_meta_driv,
+  status_col = "TP53_status"
+)
+
+gene_list_TP53 <- res_TP53$logFC
+
+names(gene_list_TP53) <- res_TP53$SYMBOL
+
+gene_list_TP53 <- sort(gene_list_TP53, decreasing = TRUE)
+
+msig_res_hall_TP53 <- GSEA(
+  geneList = gene_list_TP53,
+  TERM2GENE = m_hall_symbol,
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  nPerm = 10000,
+  pAdjustMethod = "BH"
+)
+
+dotplot(
+  msig_res_hall_TP53,
+  split = ".sign",
+  title = "TP53 LUSC GSEA"
+) +
+  facet_grid(. ~ .sign)
+
+#No hay NFE2L2 porque no hay vias asociadas
+#########################################################
+# KMT2D
+#########################################################
+
+set.seed(1234)
+
+res_KMT2D <- run_edger_deg(
+  expr_mat = LUSC_mat_driv,
+  meta = lusc_meta_driv,
+  status_col = "KMT2D_status"
+)
+
+gene_list_KMT2D <- res_KMT2D$logFC
+
+names(gene_list_KMT2D) <- res_KMT2D$SYMBOL
+
+gene_list_KMT2D <- sort(gene_list_KMT2D, decreasing = TRUE)
+
+msig_res_hall_KMT2D <- GSEA(
+  geneList = gene_list_KMT2D,
+  TERM2GENE = m_hall_symbol,
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  nPerm = 10000,
+  pAdjustMethod = "BH"
+)
+
+dotplot(
+  msig_res_hall_KMT2D,
+  split = ".sign",
+  title = "KMT2D LUSC GSEA"
+) +
+  facet_grid(. ~ .sign)
+
+
+#########################################################
+# PTEN
+#########################################################
+
+set.seed(1234)
+
+res_PTEN <- run_edger_deg(
+  expr_mat = LUSC_mat_driv,
+  meta = lusc_meta_driv,
+  status_col = "PTEN_status"
+)
+
+gene_list_PTEN <- res_PTEN$logFC
+
+names(gene_list_PTEN) <- res_PTEN$SYMBOL
+
+gene_list_PTEN <- sort(gene_list_PTEN, decreasing = TRUE)
+
+msig_res_hall_PTEN <- GSEA(
+  geneList = gene_list_PTEN,
+  TERM2GENE = m_hall_symbol,
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  nPerm = 10000,
+  pAdjustMethod = "BH"
+)
+
+dotplot(
+  msig_res_hall_PTEN,
+  split = ".sign",
+  title = "PTEN LUSC GSEA"
+) +
+  facet_grid(. ~ .sign)
+
+
+#########################################################
+# CDKN2A
+#########################################################
+
+set.seed(1234)
+
+res_CDKN2A <- run_edger_deg(
+  expr_mat = LUSC_mat_driv,
+  meta = lusc_meta_driv,
+  status_col = "CDKN2A_status"
+)
+
+gene_list_CDKN2A <- res_CDKN2A$logFC
+
+names(gene_list_CDKN2A) <- res_CDKN2A$SYMBOL
+
+gene_list_CDKN2A <- sort(gene_list_CDKN2A, decreasing = TRUE)
+
+msig_res_hall_CDKN2A <- GSEA(
+  geneList = gene_list_CDKN2A,
+  TERM2GENE = m_hall_symbol,
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  nPerm = 10000,
+  pAdjustMethod = "BH"
+)
+
+dotplot(
+  msig_res_hall_CDKN2A,
+  split = ".sign",
+  title = "CDKN2A LUSC GSEA"
+) +
+  facet_grid(. ~ .sign)
+
+
+#########################################################
+# PIK3CA
+#########################################################
+
+set.seed(1234)
+
+res_PIK3CA <- run_edger_deg(
+  expr_mat = LUSC_mat_driv,
+  meta = lusc_meta_driv,
+  status_col = "PIK3CA_status"
+)
+
+gene_list_PIK3CA <- res_PIK3CA$logFC
+
+names(gene_list_PIK3CA) <- res_PIK3CA$SYMBOL
+
+gene_list_PIK3CA <- sort(gene_list_PIK3CA, decreasing = TRUE)
+
+msig_res_hall_PIK3CA <- GSEA(
+  geneList = gene_list_PIK3CA,
+  TERM2GENE = m_hall_symbol,
+  pvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 500,
+  nPerm = 10000,
+  pAdjustMethod = "BH"
+)
+
+dotplot(
+  msig_res_hall_PIK3CA,
+  split = ".sign",
+  title = "PIK3CA LUSC GSEA"
+) +
+  facet_grid(. ~ .sign)
+
+
+```
+
+
+
+# 10. Survival KMPlotter:
+
+Para KMPlotter se ha obtado graficar para cada carcinoma el efecto de los top 5 genes up- y downregultaed de LUAD y LUSC, detectados por EdgeR y también por DESeq2, para aportar mayor rigurosidad. Aquellos genes qe se repiten en cada algoritmo se han tenido en cuenta como unica entrada, por lo tanto solo se verán los genes comunes y no comunes entre ambos algoritmos, además de los drivers estudiados anteriormente. Los top genes se han obtenido filtrando los genes por p.adj (FDR) < 0.05 y logFC <-1.5 (down) y logFC > 1.5 (Up), a partir de los conjuntos se han ordenado por logFC decreciente y seleccionado aquellos con mayor logFC en cada caso, de esta manera se asegura que los genes muestran perfiles de expresión muy diferenciados del estado normal del tejido siempre significativos.
+```{r}
+conflicts_prefer(base::union)
+top_up_lusc_edge_5 <- results_edgeR_lusc %>%
+  dplyr::filter(FDR < 0.05,logFC > 1.5) %>%
+  dplyr::arrange(desc(logFC)) %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::pull(SYMBOL)
+
+top_down_lusc_edge_5 <- results_edgeR_lusc %>%
+  dplyr::filter(FDR < 0.05,logFC < -1.5) %>%
+  dplyr::arrange(logFC) %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::pull(SYMBOL)
+
+top_up_luad_edge_5 <- results_edgeR_luad %>%
+  dplyr::filter(FDR < 0.05,logFC > 1.5) %>%
+  dplyr::arrange(desc(logFC)) %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::pull(SYMBOL)
+
+top_down_luad_edge_5 <- results_edgeR_luad %>%
+  dplyr::filter(FDR < 0.05,logFC < -1.5) %>%
+  dplyr::arrange(logFC) %>%
+  dplyr::slice_head(n = 5) %>%
+  dplyr::pull(SYMBOL)
+
+
+
+top_up_luad_des_5 <- results_deseq_luad %>%
+  filter(padj < 0.05, log2FoldChange > 1.5) %>% arrange(desc(log2FoldChange)) %>%
+  dplyr::slice_head(n = 5) %>%
+  pull(SYMBOL)
+
+
+top_down_luad_des_5 <- results_deseq_luad %>%
+  filter(padj < 0.05, log2FoldChange < -1.5) %>% 
+  arrange(log2FoldChange) %>% 
+  dplyr::slice_head(n = 5)%>%
+  pull(SYMBOL)
+
+
+top_up_lusc_des_5 <- results_deseq_lusc %>%
+  filter(padj < 0.05, log2FoldChange > 1.5) %>% arrange(desc(log2FoldChange)) %>%
+  dplyr::slice_head(n = 5) %>%
+  pull(SYMBOL)
+
+
+top_down_lusc_des_5 <- results_deseq_lusc %>%
+  filter(padj < 0.05, log2FoldChange < -1.5) %>% arrange(log2FoldChange) %>%
+  dplyr::slice_head(n = 5) %>%
+  pull(SYMBOL)
+
+intersect(top_up_luad_edge_5, top_up_luad_des_5)
+intersect(top_down_luad_edge_5, top_down_luad_des_5)
+intersect(top_up_lusc_edge_5, top_up_lusc_des_5)
+intersect(top_down_lusc_edge_5, top_down_lusc_des_5)
+
+
+
+```
+
+
+-----------------------------------------------------
+# 11. Analisis Comparativo LUAD tumoral vs LUSC tumoral
+
+Se ha mantenido el DEG inicial que se había planteado en comparar muestras tumorales de LUSC vs LUAD:
+
+```{r}
+library(edgeR)
+library(EnhancedVolcano)
+dge <- DGEList(counts = lung_mat, group = factor(lung_meta$cancer_type))
+keep <- filterByExpr(dge)
+dge1 <- dge[keep,,keep.lib.size=FALSE]
+
+#Normalización TMM y comprobación:
+dge <- normLibSizes(dge1,"TMM") # normalizción de datos por TMM
+
+   ## Graficación de normalización:
+plot(dge$samples$norm.factors, main="Normalization Factors")
+
+boxplot(cpm(dge, log=TRUE)[, 1:200],
+        las = 2,
+        main = "5 muestras (eje X)")
+
+
+conflicted::conflicts_prefer(base::as.factor)
+
+col_er <- as.factor(dge$samples$group)
+levels(col_er) <- c("blue","red")
+col_er <- as.character(col_er)
+plotMDS(cpm(dge, log=TRUE), labels=NULL, pch=1, col=col_er)
+
+group <- factor(dge$samples$group)
+group <- relevel(group, ref="LUAD")
+design <- model.matrix(~ group)
+
+    ## Estimar dispersion:
+dge <- estimateDisp(dge, design)
+plotBCV(dge, main="Dispersion estimates and adjustment")
+
+
+    ## Ajustar modelo:
+fit <- glmQLFit(dge, design)
+qlf <- glmQLFTest(fit, coef = 2) # Compara LUSC vs LUAD
+results_edgeR <- topTags(qlf, n = Inf)$table
+results_edgeR <- results_edgeR %>% 
+  tibble::rownames_to_column("SYMBOL")
+
+set.seed(1234)
+
+#png("edgeRVolcano_LUAD_LUSC.png")
+EnhancedVolcano(results_edgeR,
+                lab = results_edgeR$SYMBOL,
+                x = 'logFC',
+                y = 'FDR',
+                FCcutoff = 1.5,
+                pCutoff = 0.01,
+                colCustom = c(
+                  "NS"   = "grey60",
+                  "LUAD" = "#3697AF",
+                  "LUSC" = "salmon")[results_edgeR %>% 
+                                       dplyr::mutate(group = dplyr::case_when(
+                                         FDR <= 0.05 & logFC <= -1.5 ~ "LUAD",
+                                         FDR <= 0.05 & logFC >= 1.5  ~ "LUSC",
+                                         TRUE ~ "NS")) %>% dplyr::pull(group)], 
+                pointSize = 1,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.5,
+                legendPosition = 'bottom',
+                subtitle = "Cutoff: FDR = 0.05 | FC = 1.5")
+
+#dev.off()
+
+
+```
+
+```{r, warning=FALSE}
+top_LUSC <- results_edgeR %>%
+  filter(logFC > 1.5) %>%
+  arrange(desc(logFC)) %>%
+  head(20)
+
+top_LUAD <- results_edgeR %>%
+  filter(logFC < -1.5) %>%
+  arrange(logFC) %>%
+  head(20)
+
+selected_genes <- rbind(top_LUSC, top_LUAD)
+top_40_genes <- selected_genes$SYMBOL
+
+heatmap_matrix_edge <- cpm(dge, log=TRUE)[top_40_genes, ]
+heatmap_matrix_edge <- t(scale(t(heatmap_matrix_edge)))
+
+library(ComplexHeatmap)
+set.seed(1234)
+
+ha <- HeatmapAnnotation(
+  cancer_type = lung_meta$cancer_type, col = list(cancer_type = c("LUSC" = "red", "LUAD" = "blue"))
+)
+
+Heatmap(heatmap_matrix_edge,
+        name = "Z-Score",
+        show_column_names = FALSE,
+        border = TRUE,
+        row_names_gp = gpar(fontsize = 7),
+        top_annotation = ha)
+```
+
+# 12. COMPROBACIÓN DEG con DESEQ2:
+
+```{r}
+library(DESeq2)
+
+
+dds1 <- DESeqDataSetFromMatrix(
+  countData = dge1$counts,
+  colData = lung_meta,
+  design = ~ cancer_type
+)
+
+dds <- DESeq(dds1, betaPrior = FALSE)
+res <- results(dds, contrast = c("cancer_type", "LUSC", "LUAD"))
+res_shrunk <- lfcShrink(dds,
+  coef = "cancer_type_LUSC_vs_LUAD" ,
+  type = "apeglm"
+)
+results_deseq <- as.data.frame(res_shrunk) %>%
+  tibble::rownames_to_column("SYMBOL")%>%
+  na.omit()
+
+library(EnhancedVolcano)
+set.seed(1234)
+
+
+EnhancedVolcano(results_deseq,
+                lab = results_deseq$SYMBOL,
+                x = 'log2FoldChange',
+                y = 'padj',
+                FCcutoff = 1.5,
+                pCutoff = 0.01,
+                colCustom = c(
+                  "NS"   = "grey60",
+                  "LUAD" = "#3697AF",
+                  "LUSC" = "salmon")[results_deseq %>% 
+                                       dplyr::mutate(group = dplyr::case_when(
+                                         padj <= 0.05 & log2FoldChange <= -1.5 ~ "LUAD",
+                                         padj <= 0.05 & log2FoldChange >= 1.5  ~ "LUSC",
+                                         TRUE ~ "NS")) %>% dplyr::pull(group)], 
+                pointSize = 1,
+                colAlpha = 1,
+                drawConnectors = TRUE,
+                widthConnectors = 0.5,
+                legendPosition = 'bottom',
+                subtitle = "Cutoff: FDR = 0.05 | FC = 1.5")
+
+
+```
+
+
+
+```{r, warning=FALSE}
+
+top_LUSC_des <- results_deseq %>%
+  filter(log2FoldChange > 1.5) %>%
+  arrange(padj) %>%
+  head(20)
+
+top_LUAD_des <- results_deseq %>%
+  filter(log2FoldChange < -1.5) %>%
+  arrange(padj) %>%
+  head(20)
+
+selected_genes_des <- rbind(top_LUSC_des, top_LUAD_des)
+top_40_genes_des <- selected_genes_des$SYMBOL
+
+vsd_des <- vst(dds1, blind = TRUE)
+vsd_des <- assay(vsd_des)
+heatmap_matrix_des <- vsd_des[top_40_genes_des, ]
+heatmap_matrix_des <- t(scale(t(heatmap_matrix_des)))
+
+library(ComplexHeatmap)
+set.seed(1234)
+
+ha <- HeatmapAnnotation(
+  cancer_type = lung_meta$cancer_type, col = list(cancer_type = c("LUSC" = "red", "LUAD" = "blue"))
+)
+
+Heatmap(heatmap_matrix_des,
+        name = "Z-Score",
+        show_column_names = FALSE,
+        border = TRUE,
+        row_names_gp = gpar(fontsize = 7),
+        top_annotation = ha)
+
+```
+
+
+
+```{r}
+# Instala y carga las librerías necesarias si no las tienes
+# install.packages(c("ggVennDiagram", "ggplot2", "gridExtra", "RColorBrewer"))
+library(ggVennDiagram)
+library(ggplot2)
+library(gridExtra)
+library(RColorBrewer)
+
+er_up_LUAD <- results_edgeR$SYMBOL[results_edgeR$FDR <= 0.05 & results_edgeR$logFC <= -1.5]
+er_up_LUSC <- results_edgeR$SYMBOL[results_edgeR$FDR <= 0.05 & results_edgeR$logFC >= 1.5]
+ds_up_LUAD <- results_deseq$SYMBOL[results_deseq$padj <= 0.05 & results_deseq$log2FoldChange <= -1.5]
+ds_up_LUSC <- results_deseq$SYMBOL[results_deseq$padj <= 0.05 & results_deseq$log2FoldChange >= 1.5]
+
+# 1. Preparar las listas de datos (asegúrate de que estas variables existen)
+lista_lusc <- list(edgeR = er_up_LUSC, DESeq2 = ds_up_LUSC)
+lista_luad <- list(edgeR = er_up_LUAD, DESeq2 = ds_up_LUAD)
+
+# 2. Definir una paleta de colores elegante y profesional
+# Usamos una paleta "Set1" de Brewer que es muy común en publicaciones
+colores_lusc <- brewer.pal(3, "Set1")[1:2] # Rojo y Azul suaves
+colores_luad <- brewer.pal(3, "Set2")[1:2] # Verde y Naranja suaves
+
+# 3. Crear el primer diagrama (LUSC) con estética elíptica/diagonal
+p1 <- ggVennDiagram(lista_lusc, 
+                    label = "count",        # Mostrar el número de genes
+                    label_alpha = 0,        # Fondo de etiqueta transparente
+                    label_size = 6,         # Tamaño del número central
+                    category.names = c("edgeR", "DESeq2"), # Nombres de las categorías
+                    set_size = 5) +         # Tamaño del texto de categoría
+  scale_fill_gradient(low = "white", high = colores_lusc[1]) + # Degradado suave
+  theme_void() +                           # Fondo totalmente limpio
+  theme(legend.position = "none",          # Quitar la leyenda de colores
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) +
+  labs(title = "Marcadores LUSC (UP Derecha)")
+
+# 4. Crear el segundo diagrama (LUAD) con la misma estética
+p2 <- ggVennDiagram(lista_luad, 
+                    label = "count",
+                    label_alpha = 0,
+                    label_size = 6,
+                    category.names = c("edgeR", "DESeq2"),
+                    set_size = 5) +
+  scale_fill_gradient(low = "white", high = colores_luad[1]) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) +
+  labs(title = "Marcadores LUAD (UP Izquierda)")
+
+# 5. PASO CLAVE: Dibujar ambos paneles juntos en diagonal
+# Usamos grid.arrange para la disposición en panel
+grid.arrange(p1, p2, ncol = 2)
+```
+
+Dados que los datos de ambos metodos han resultado ser muy similares se realizará un GSEA con los datos de edgeR:
+
+
+# 13. Gene Set Enrichment Analysis (GSEA):
+
+```{r warning=FALSE}
+library(clusterProfiler)
+library(enrichplot)
+library(ggplot2)
+library(org.Hs.eg.db)
+
+#Obtener ENTEREZID de los resultados de EdgeR:
+df_edgeR <- results_edgeR
+gene_map <- bitr(df_edgeR$SYMBOL,
+                fromType = "SYMBOL",
+                toType = "ENTREZID",
+                OrgDb = org.Hs.eg.db)%>%
+  distinct(SYMBOL, .keep_all = TRUE) 
+
+df_edgeR$ENTREZID <- gene_map$ENTREZID[match(df_edgeR$SYMBOL, gene_map$SYMBOL)]
+
+
+#Extraer log2FoldChange:
+gene_list_lfc <- df_edgeR$logFC
+
+# Nombrar vector:
+names(gene_list_lfc) <- df_edgeR$SYMBOL
+
+#Evitar NA's:
+gene_list <- na.omit(gene_list_lfc)
+
+#Ordenar la lista de manera decreciente:
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+
+
+
+# Realizar GSEA:
+
+library(msigdbr)
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  select(gs_name, gene_symbol)
+m_reactome_symbol <- msigdbr(species = "Homo sapiens", 
+                             category = "C2", 
+                             subcategory = "CP:REACTOME") %>% 
+  dplyr::select(gs_name, gene_symbol)
+
+msig_gsea_reactome <- GSEA(geneList = gene_list, 
+                 TERM2GENE = m_reactome_symbol,
+                 pvalueCutoff = 0.05, 
+                 seed = 2022,
+                 minGSSize = 10,
+                 maxGSSize = 800,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+
+dotplot(msig_gsea_reactome, showCategory = 10, split = ".sign", font.size= 5) +
+  facet_grid(. ~ .sign, labeller = as_labeller(c("activated" = "LUSC (Sobreactivada)", 
+                                      "suppressed" = "LUAD (Sobreactivada)")))
+
+
+
+##### KEGG #####
+m_kegg_symbol <- msigdbr(species = "Homo sapiens", 
+                         category = "C2", 
+                         subcategory = "CP:KEGG_LEGACY") %>% 
+  dplyr::select(gs_name, gene_symbol)
+
+msig_res <- GSEA(geneList = gene_list, 
+                 TERM2GENE = m_kegg_symbol,
+                 pvalueCutoff = 0.05, 
+                 minGSSize = 10,
+                 maxGSSize = 800,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+require(DOSE)
+dotplot(msig_res, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign, labeller = as_labeller(c("activated" = "LUSC (Sobreactivada)", 
+                                      "suppressed" = "LUAD (Sobreactivada)")))
+
+
+###### HALLMARK####
+m_hall_symbol <- msigdbr(species = "Homo sapiens", 
+                         category = "H") %>% 
+  dplyr::select(gs_name, gene_symbol)
+
+msig_res_hall <- GSEA(geneList = gene_list, 
+                 TERM2GENE = m_hall_symbol,
+                 pvalueCutoff = 0.05, 
+                 minGSSize = 10,
+                 maxGSSize = 800,
+                 nPerm = 10000,
+                 pAdjustMethod = "BH")
+
+
+dotplot(msig_res_hall, showCategory = 10, split = ".sign") +
+  facet_grid(. ~ .sign, labeller = as_labeller(c("activated" = "LUSC (Sobreactivada)", 
+                                      "suppressed" = "LUAD (Sobreactivada)")))
+
+
+## GO:
+
+####### BP:
+gse_GO_bp <- gseGO(geneList = gene_list,
+                ont = "BP",
+                OrgDb = org.Hs.eg.db,
+                minGSSize = 10,
+                maxGSSize = 800,
+                keyType = "SYMBOL",
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH")
+
+
+dotplot(gse_GO_bp, split = ".sign",font.size= 6) +
+  facet_grid(. ~ .sign,labeller = as_labeller(c("activated" = "LUSC (Sobreactivada)", 
+                                      "suppressed" = "LUAD (Sobreactivada)")))
+
+###### CCs:
+gse_GO_cc <- gseGO(geneList = gene_list,
+                ont = "CC",
+                OrgDb = org.Hs.eg.db,
+                minGSSize = 10,
+                maxGSSize = 800,
+                keyType = "SYMBOL",
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH")
+
+dotplot(gse_GO_cc, split = ".sign",font.size= 6) +
+  facet_grid(. ~ .sign, labeller = as_labeller(c("activated" = "LUSC (Sobreactivada)", 
+                                      "suppressed" = "LUAD (Sobreactivada)")))
+
+##### MFs:
+gse_GO_mf <- gseGO(geneList = gene_list,
+                ont = "MF",
+                OrgDb = org.Hs.eg.db,
+                minGSSize = 10,
+                maxGSSize = 800,
+                keyType = "SYMBOL",
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH")
+
+dotplot(gse_GO_mf, split = ".sign",font.size= 6) +
+  facet_grid(. ~ .sign, labeller = as_labeller(c("activated" = "LUSC (Sobreactivada)", 
+                                      "suppressed" = "LUAD (Sobreactivada)")))
+
+
+```
+Para realizar esto me he basado en el NES, positivos, enriquecido por genes en la parte superior de la tabla (upregulated en LUSC), NES negativo indica pathways enriquecidas por genes de la parte inferior de la tabla (downregulated en LUSC), pero en LUAD corresponde a pathways especificas del tumor.
+
+
+
